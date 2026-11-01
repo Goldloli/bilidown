@@ -88,7 +88,6 @@ jobs:
       - name: Report macOS package size
         if: runner.os == 'macOS'
         run: |
-          du -sh target/release/bundle/macos/bilidown.app
           du -h target/release/bundle/dmg/*.dmg
       - uses: actions/upload-artifact@v7
         with:
