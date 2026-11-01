@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/readme/main-empty-light.png" alt="bilidown 主界面" width="900">
+  <img src="assets/readme/main-empty-light.png" alt="bilidown 主界面" width="900">
 </p>
 
 ## 下载
@@ -221,4 +221,4 @@ macOS 发布前会校验 ffmpeg 的 arm64 架构、最低系统版本、系统�
 - Windows：BtbN FFmpeg LGPLv3 构建
 - macOS：FFmpeg 8.1.3 + LAME 3.100 的 LGPL 静态 arm64 构建
 
-对应许可证、精确版本、源码地址与构建参数会随安装包分发，详见 [`src-tauri/resources/NOTICE.ffmpeg.txt`](src-tauri/resources/NOTICE.ffmpeg.txt) 和 [`docs/ACKNOWLEDGEMENTS.md`](docs/ACKNOWLEDGEMENTS.md)。
+对应许可证、精确版本、源码地址与构建参数会随安装包分发，详见 [`src-tauri/resources/NOTICE.ffmpeg.txt`](src-tauri/resources/NOTICE.ffmpeg.txt) 和 [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md)。

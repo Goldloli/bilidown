@@ -1105,7 +1105,7 @@ fn about_link_url(link: &str) -> Option<&'static str> {
         "license" => Some("https://github.com/Goldloli/bilidown/blob/main/LICENSE"),
         "author" => Some("https://github.com/Goldloli"),
         "acknowledgements" => {
-            Some("https://github.com/Goldloli/bilidown/blob/main/docs/ACKNOWLEDGEMENTS.md")
+            Some("https://github.com/Goldloli/bilidown/blob/main/ACKNOWLEDGEMENTS.md")
         }
         _ => None,
     }

@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const source = await fs.readFile(path.join(root, 'docs/design/app-icon.svg'), 'utf8');
+const source = await fs.readFile(path.join(root, 'assets/app-icon.svg'), 'utf8');
 const icoSizes = [16, 24, 32, 48, 64, 128, 256];
 const macIconsetFiles = [
   ['icon_16x16.png', 16],
@@ -98,4 +98,4 @@ if (process.platform === 'darwin') {
   console.log('macOS ICNS 已生成：src-tauri/icons/icon.icns');
 }
 
-console.log(`图标已从 docs/design/app-icon.svg 生成；ICO 尺寸：${icoSizes.join('/')}`);
+console.log(`图标已从 assets/app-icon.svg 生成；ICO 尺寸：${icoSizes.join('/')}`);

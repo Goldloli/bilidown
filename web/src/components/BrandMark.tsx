@@ -1,4 +1,4 @@
-/** 由 docs/design/app-icon.svg 导出；各尺寸共享母版，避免界面与系统图标分叉。 */
+/** 由 assets/app-icon.svg 导出；各尺寸共享母版，避免界面与系统图标分叉。 */
 const BRAND_ICON = '/app-icon.svg';
 
 export function BrandMark({ size = 96, title = 'bilidown' }: { size?: number; title?: string }) {

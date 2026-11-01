@@ -14,17 +14,11 @@ openspec/
 *.gate.lock*
 
 # ---------------------------------------------------------------------------
-# 内部 QA、废弃开发页与本地 GUI 自动化脚本
+# 本地文档、废弃开发页与本地 GUI 自动化脚本
 # ---------------------------------------------------------------------------
-/docs/qa/
+/docs/
 /src-tauri/dev/
 /tools/
-
-# 历史图标候选；仅保留文档中被引用的最终透明底源图
-/docs/design/icons/*
-!/docs/design/icons/v3-transparent/
-/docs/design/icons/v3-transparent/*
-!/docs/design/icons/v3-transparent/b-blue-tray-chip.png
 
 # ---------------------------------------------------------------------------
 # 依赖与包管理器缓存
