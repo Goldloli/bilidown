@@ -20,10 +20,12 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
 toml = "1.1"
-rand = "0.8"
-rsa = "0.9"
-hmac = "0.12"
-sha2 = "0.10"
+rand = "0.10"
+rsa = { version = "0.9", features = ["getrandom"] }
+hmac = "0.13"
+sha2 = "0.11"
+# rsa 0.9 的 OAEP 仍使用 digest 0.10；rsa 0.10 稳定后可移除该兼容依赖。
+sha2_compat = { package = "sha2", version = "0.10" }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

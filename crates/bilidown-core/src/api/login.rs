@@ -271,12 +271,12 @@ pub fn correspond_public_key() -> BiliResult<rsa::RsaPublicKey> {
 
 /// 用给定公钥加密 `refresh_{timestamp_ms}`，返回小写 hex 的 correspondPath。
 pub fn encrypt_correspond_path(key: &rsa::RsaPublicKey, timestamp_ms: i64) -> BiliResult<String> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rsa::rand_core::OsRng;
     let message = format!("refresh_{timestamp_ms}");
     let cipher = key
         .encrypt(
             &mut rng,
-            rsa::Oaep::new::<sha2::Sha256>(),
+            rsa::Oaep::new::<sha2_compat::Sha256>(),
             message.as_bytes(),
         )
         .map_err(|e| BiliError::Other(format!("correspondPath 加密失败: {e}")))?;
@@ -599,13 +599,13 @@ mod tests {
     #[test]
     fn correspond_path_oaep_roundtrip() {
         // 用临时生成的 RSA 私钥验证「OAEP(SHA-256) + 小写 hex」语义正确
-        let mut rng = rand::thread_rng();
+        let mut rng = rsa::rand_core::OsRng;
         let private = rsa::RsaPrivateKey::new(&mut rng, 1024).unwrap();
         let public = rsa::RsaPublicKey::from(&private);
         let path = encrypt_correspond_path(&public, 1_700_000_000_000).unwrap();
         let cipher = hex_bytes(&path);
         let plain = private
-            .decrypt(rsa::Oaep::new::<sha2::Sha256>(), &cipher)
+            .decrypt(rsa::Oaep::new::<sha2_compat::Sha256>(), &cipher)
             .unwrap();
         assert_eq!(String::from_utf8(plain).unwrap(), "refresh_1700000000000");
         // 内置 B 站公钥可解析
