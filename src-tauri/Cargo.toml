@@ -1,0 +1,58 @@
+[package]
+name = "bilidown-app"
+version = "2.3.2"
+edition = "2024"
+description = "bilidown desktop shell (Tauri 2)"
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri 核心（macos-private-api 用于 overlay 透明窗口 + vibrancy 材质）
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+# 官方插件
+tauri-plugin-log = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+# core 引擎（4.5 接线）
+bilidown-core = { path = "../crates/bilidown-core" }
+# 序列化 / 日志 / 时间
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+tracing = "0.1"
+dirs = "6"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time", "fs", "io-util"] }
+tokio-util = "0.7"
+base64 = "0.23"
+# 应用内更新（GitHub Releases + DMG 下载 + SHA256）
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+semver = "1"
+sha2 = "0.10"
+
+# macOS 专用：Dock 徽标（Tauri 2.12 无公开 badge API，见 src/dock.rs）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSProcessInfo"] }
+
+# Windows 专用：磁盘剩余空间与原生窗口轮廓
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+

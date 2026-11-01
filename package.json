@@ -1,0 +1,39 @@
+{
+  "name": "bilidown-app",
+  "private": true,
+  "version": "2.3.2",
+  "type": "module",
+  "scripts": {
+    "dev:web": "vite --config web/vite.config.ts",
+    "build:web": "vite build --config web/vite.config.ts",
+    "typecheck": "tsc --noEmit -p web/tsconfig.json",
+    "qa:screenshots": "node web/qa/screenshots.mjs",
+    "qa:interactions": "node web/qa/interactions.mjs",
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "test": "vitest run --config web/vitest.config.ts",
+    "check-version": "node scripts/version.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "motion": "^14",
+    "react": "^19",
+    "react-dom": "^19",
+    "zustand": "^5",
+    "@tanstack/react-virtual": "^3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^5",
+    "playwright": "^1",
+    "tailwindcss": "^4",
+    "typescript": "^7.0",
+    "vite": "^8",
+    "vitest": "^5"
+  }
+}

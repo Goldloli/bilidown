@@ -1,0 +1,68 @@
+bilidown macOS ffmpeg 构建来源与复现说明
+========================================
+
+目标
+----
+原生 arm64 Mach-O，最低 macOS 13.0。
+
+固定源码
+--------
+FFmpeg 8.1.3
+URL:    https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz
+SHA256: 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+Size:   11732036 bytes
+
+LAME 3.100
+URL:    https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz
+SHA256: ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
+Size:   1524133 bytes
+
+构建配置
+--------
+--disable-gpl
+--disable-nonfree
+--disable-version3
+--disable-autodetect
+--disable-debug
+--disable-doc
+--disable-htmlpages
+--disable-manpages
+--disable-podpages
+--disable-txtpages
+--disable-programs
+--enable-ffmpeg
+--disable-network
+--enable-protocol=file,pipe
+--enable-static
+--disable-shared
+--enable-libmp3lame
+--enable-stripping
+
+构建环境额外设置：
+- --arch=arm64
+- --target-os=darwin
+- --cc=clang
+- MACOSX_DEPLOYMENT_TARGET=13.0
+- PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR 仅指向本次静态构建的 LAME
+
+复现
+----
+在 Apple Silicon macOS 上，于 bilidown 仓库根目录运行：
+
+  node scripts/fetch-ffmpeg.mjs macos-arm64 --force
+
+脚本从 `scripts/ffmpeg.lock.json` 读取上述固定信息，先校验文件大小和 SHA256，
+再静态编译 LAME 与 FFmpeg，并生成：
+
+  src-tauri/binaries/macos/ffmpeg-aarch64-apple-darwin
+
+构建脚本：
+  scripts/build-ffmpeg-macos.sh
+
+验证脚本：
+  node scripts/verify-ffmpeg-macos.mjs --binary <ffmpeg> --smoke
+
+许可证
+------
+FFmpeg: COPYING.LGPLv2.1.ffmpeg
+LAME:   COPYING.LAME

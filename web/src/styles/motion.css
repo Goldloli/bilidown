@@ -1,0 +1,21 @@
+/* 动态效果降级（data-motion=reduce）：只影响动画/过渡，不改布局 */
+:root[data-motion="reduce"] *,
+:root[data-motion="reduce"] *::before,
+:root[data-motion="reduce"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* 系统开启减弱动态效果时，即使偏好为 system 也降级（data-motion 已解析，双保险） */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="normal"]) *,
+  :root:not([data-motion="normal"]) *::before,
+  :root:not([data-motion="normal"]) *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

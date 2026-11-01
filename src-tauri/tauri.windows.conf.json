@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "bilidown",
+        "width": 1024,
+        "height": 680,
+        "minWidth": 760,
+        "minHeight": 480,
+        "center": true,
+        "visible": false,
+        "dragDropEnabled": false,
+        "decorations": false,
+        "shadow": false,
+        "transparent": false
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["nsis"],
+    "externalBin": ["binaries/windows/ffmpeg"],
+    "resources": {
+      "resources/COPYING.LGPLv3.ffmpeg": "COPYING.LGPLv3.ffmpeg",
+      "resources/NOTICE.ffmpeg.txt": "NOTICE.ffmpeg.txt"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
+  }
+}

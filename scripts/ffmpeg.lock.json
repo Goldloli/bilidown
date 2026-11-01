@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "windows-x64": {
+    "mode": "download",
+    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-win64-lgpl-8.1.zip",
+    "sha256": "d4c2a42673917b4a97104a3e9f082729a9730796b98664e37c0b7eba6c6c613d",
+    "archiveSize": 167778744,
+    "member": "bin/ffmpeg.exe"
+  },
+  "macos-arm64": {
+    "mode": "build",
+    "triple": "aarch64-apple-darwin",
+    "binary": "ffmpeg",
+    "builder": "build-ffmpeg-macos.sh",
+    "builderVersion": 1,
+    "deploymentTarget": "13.0",
+    "ffmpeg": {
+      "version": "8.1.3",
+      "url": "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz",
+      "sha256": "7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3",
+      "archiveSize": 11732036,
+      "archive": "ffmpeg-8.1.3.tar.xz",
+      "directory": "ffmpeg-8.1.3"
+    },
+    "lame": {
+      "version": "3.100",
+      "url": "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz",
+      "sha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "archiveSize": 1524133,
+      "archive": "lame-3.100.tar.gz",
+      "directory": "lame-3.100"
+    },
+    "configure": [
+      "--disable-gpl",
+      "--disable-nonfree",
+      "--disable-version3",
+      "--disable-autodetect",
+      "--disable-debug",
+      "--disable-doc",
+      "--disable-htmlpages",
+      "--disable-manpages",
+      "--disable-podpages",
+      "--disable-txtpages",
+      "--disable-programs",
+      "--enable-ffmpeg",
+      "--disable-network",
+      "--enable-protocol=file,pipe",
+      "--enable-static",
+      "--disable-shared",
+      "--enable-libmp3lame",
+      "--enable-stripping"
+    ]
+  }
+}

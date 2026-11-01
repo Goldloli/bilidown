@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90" width="640" height="360">
+  <defs>
+    <linearGradient id="moon" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2a5c"/>
+      <stop offset="0.6" stop-color="#3b4c9e"/>
+      <stop offset="1" stop-color="#87a9f0"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="90" fill="url(#moon)"/>
+  <circle cx="120" cy="24" r="10" fill="#f7f3d8" opacity="0.9"/>
+  <g fill="#fff" opacity="0.6">
+    <circle cx="26" cy="18" r="0.9"/><circle cx="48" cy="30" r="1.2"/><circle cx="70" cy="14" r="0.8"/>
+    <circle cx="96" cy="34" r="1"/><circle cx="138" cy="40" r="0.9"/><circle cx="34" cy="42" r="0.7"/>
+  </g>
+  <path d="M0 62 Q22 50 44 60 T88 58 T132 54 T160 60 L160 90 L0 90 Z" fill="#141d3f" opacity="0.9"/>
+  <path d="M0 74 Q30 64 60 72 T120 70 T160 76 L160 90 L0 90 Z" fill="#0b1229"/>
+  <text x="10" y="18" font-family="-apple-system, sans-serif" font-size="8" fill="#fff" opacity="0.85">SŌSŌ · 第 28 话</text>
+</svg>
