@@ -91,7 +91,7 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
 /// 计算 `bili_ticket` 的 `hexsign`：`HMAC-SHA256(key = "XgwSnGZ1p", msg = "ts{timestamp}")`，
 /// 输出小写 hex。纯函数，便于单测。
 pub fn ticket_hexsign(timestamp_secs: i64) -> String {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     let mut mac = Hmac::<Sha256>::new_from_slice(BILI_TICKET_HMAC_KEY.as_bytes())
@@ -730,11 +730,12 @@ fn unix_now() -> u64 {
 
 /// 生成 B 站 web 端风格的 `_uuid`（大写 UUID + infoc）。
 fn generate_uuid() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+
+    let mut rng = rand::rng();
     let mut hex = |n: usize| -> String {
         (0..n)
-            .map(|_| format!("{:X}", rng.gen_range(0u8..16)))
+            .map(|_| format!("{:X}", rng.random_range(0u8..16)))
             .collect::<String>()
     };
     format!(
