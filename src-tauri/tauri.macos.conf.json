@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "node scripts/fetch-ffmpeg.mjs && pnpm dev:web"
+  },
+  "bundle": {
+    "targets": ["dmg"],
+    "externalBin": ["binaries/macos/ffmpeg"],
+    "resources": {
+      "resources/NOTICE.ffmpeg.txt": "NOTICE.ffmpeg.txt",
+      "resources/COPYING.LGPLv2.1.ffmpeg": "COPYING.LGPLv2.1.ffmpeg",
+      "resources/COPYING.LAME": "COPYING.LAME",
+      "resources/FFMPEG-SOURCE.txt": "FFMPEG-SOURCE.txt"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90" width="640" height="360">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd7c2"/>
+      <stop offset="0.55" stop-color="#fb7299"/>
+      <stop offset="1" stop-color="#7a3d8f"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="90" fill="url(#sky)"/>
+  <circle cx="118" cy="26" r="12" fill="#fff" opacity="0.55"/>
+  <path d="M0 66 L26 44 L48 62 L70 38 L96 64 L122 50 L160 72 L160 90 L0 90 Z" fill="#2c1a33" opacity="0.75"/>
+  <path d="M0 76 L30 62 L56 74 L86 60 L112 74 L140 64 L160 76 L160 90 L0 90 Z" fill="#160d1c" opacity="0.85"/>
+  <text x="10" y="18" font-family="-apple-system, sans-serif" font-size="8" fill="#fff" opacity="0.8">ICELAND · 2026</text>
+</svg>

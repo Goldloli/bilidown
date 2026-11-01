@@ -1,0 +1,232 @@
+/* ==========================================================================
+   bilidown design tokens（唯一色彩/尺寸/动效来源，见 docs/design/DESIGN_SYSTEM.md）
+   · 浅色为 :root 默认；深色由 <html data-theme="dark"> 覆盖
+   · 组件禁止硬编码颜色/圆角/时长
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* 色彩 · 浅色 */
+  --bg-window: #ecebe9;
+  --bg-content: #f2f1ef;
+  --panel: #f7f6f4;
+  --panel-raised: #ffffff;
+  --sidebar: #e6e4e1;
+  --card: #ffffff;
+  --card-inset: #f6f5f3;
+  --text-1: #1d1d1f;
+  --text-2: #6e6e73;
+  --text-3: #8e8e93;
+  --text-on-accent: #ffffff;
+  --hairline: #dad8d3;
+  --hairline-strong: #c9c7c1;
+  --field-bg: #ffffff;
+  --field-border: #d5d3ce;
+
+  /* 强调色：默认蓝色；JS 可覆盖 --accent，派生色由 color-mix 自动跟随 */
+  --accent: #3b82f6;
+  --accent-hover: color-mix(in srgb, var(--accent) 82%, #ffffff);
+  --accent-pressed: color-mix(in srgb, var(--accent) 84%, #000000);
+  --accent-weak: color-mix(in srgb, var(--accent) 12%, #ffffff);
+  --accent-weak-2: color-mix(in srgb, var(--accent) 22%, #ffffff);
+  --accent-text: var(--accent);
+
+  /* 状态色 */
+  --success: #1e7b44;
+  --success-weak: #e6f4ea;
+  --danger: #b3463f;
+  --danger-weak: #fbeae9;
+  --warning: #b26a00;
+  --info: #2f6fdb;
+
+  /* 交互面 */
+  --hover-fill: rgba(0, 0, 0, 0.045);
+  --pressed-fill: rgba(0, 0, 0, 0.085);
+  --selection-fill: color-mix(in srgb, var(--accent) 12%, transparent);
+  --scrim: rgba(18, 16, 14, 0.3);
+  --scroll-thumb: rgba(0, 0, 0, 0.2);
+  --focus-ring: color-mix(in srgb, var(--accent) 55%, transparent);
+  --tooltip-bg: rgba(32, 32, 34, 0.92);
+  --tooltip-fg: #ffffff;
+  --segment-bg: #e9e7e3;
+  --segment-selected: #ffffff;
+  --rail-bg: rgba(0, 0, 0, 0.055);
+  --desktop-backdrop: #c9c6c1;
+  /* 行内进度胶囊 */
+  --capsule-track: color-mix(in srgb, var(--accent) 12%, #ffffff);
+  --capsule-fill: var(--accent);
+  --capsule-text: #1d1d1f;
+  --capsule-success: #1e7b44;
+  --capsule-danger: #b3463f;
+  --capsule-neutral: rgba(0, 0, 0, 0.05);
+  --capsule-neutral-text: #6e6e73;
+  --capsule-warning: rgba(178, 106, 0, 0.14);
+  --capsule-warning-text: #8a5300;
+
+  /* 字体 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    "SF Pro Text", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+
+  /* 字号 / 行高 */
+  --fs-11: 11px;
+  --lh-11: 15px;
+  --fs-12: 12px;
+  --lh-12: 17px;
+  --fs-13: 13px;
+  --lh-13: 18px;
+  --fs-15: 15px;
+  --lh-15: 20px;
+  --fs-17: 17px;
+  --lh-17: 22px;
+
+  /* 间距（4pt 栅格） */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* 布局尺寸 */
+  --titlebar-h: 40px;
+  --bottombar-h: 48px;
+  --bottombar-inset: 16px;
+  --content-pad-x: 16px;
+  --row-h: 104px;
+  --row-gap: 8px;
+  --row-pad: 8px;
+  --thumb-w: 144px;
+  --thumb-r: 8px;
+  --progress-h: 24px;
+  --icon-btn: 28px;
+  --sidebar-w: 208px;
+  --settings-w: 880px;
+  --ctrl-h: 28px;
+  --toolbar-h: 44px;
+
+  /* 圆角 */
+  --r-window: 18px;
+  --r-card: 14px;
+  --r-sheet: 16px;
+  --r-pop: 10px;
+  --r-ctrl: 7px;
+  --r-tile: 8px;
+  --r-tag: 6px;
+  --r-capsule: 999px;
+
+  /* 阴影（只给浮层） */
+  --shadow-bottombar: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.1);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.24), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
+  --shadow-toast: 0 8px 24px rgba(0, 0, 0, 0.18);
+
+  /* 动效 */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 240ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-window: #121214;
+  --bg-content: #161618;
+  --panel: #232326;
+  --panel-raised: #2c2c2f;
+  --sidebar: #1a1a1c;
+  --card: #1c1c1e;
+  --card-inset: #242427;
+  --text-1: #f5f5f7;
+  --text-2: #a1a1a6;
+  --text-3: #8e8e93;
+  --text-on-accent: #ffffff;
+  --hairline: #303034;
+  --hairline-strong: #3a3a3e;
+  --field-bg: #232326;
+  --field-border: #3a3a3e;
+
+  --accent: #fb7299;
+  --accent-hover: color-mix(in srgb, var(--accent) 86%, #ffffff);
+  --accent-pressed: color-mix(in srgb, var(--accent) 84%, #000000);
+  --accent-weak: color-mix(in srgb, var(--accent) 18%, transparent);
+  --accent-weak-2: color-mix(in srgb, var(--accent) 30%, transparent);
+  --accent-text: var(--accent);
+
+  --success: #2e9e61;
+  --success-weak: rgba(46, 158, 97, 0.18);
+  --danger: #d0574f;
+  --danger-weak: rgba(208, 87, 79, 0.18);
+  --warning: #d8963e;
+  --info: #6ea0ff;
+
+  --hover-fill: rgba(255, 255, 255, 0.06);
+  --pressed-fill: rgba(255, 255, 255, 0.1);
+  --selection-fill: color-mix(in srgb, var(--accent) 20%, transparent);
+  --scrim: rgba(0, 0, 0, 0.52);
+  --scroll-thumb: rgba(255, 255, 255, 0.22);
+  --focus-ring: color-mix(in srgb, var(--accent) 65%, transparent);
+  --tooltip-bg: rgba(74, 74, 78, 0.96);
+  --tooltip-fg: #ffffff;
+  --segment-bg: #2a2a2d;
+  --segment-selected: #3f3f43;
+  --rail-bg: rgba(255, 255, 255, 0.075);
+  --desktop-backdrop: #0b0b0c;
+  --capsule-track: color-mix(in srgb, var(--accent) 16%, #1c1c1e);
+  --capsule-fill: color-mix(in srgb, var(--accent) 62%, transparent);
+  --capsule-text: #f5f5f7;
+  --capsule-success: #1e7b44;
+  --capsule-danger: #8f3a35;
+  --capsule-neutral: rgba(255, 255, 255, 0.06);
+  --capsule-neutral-text: #a1a1a6;
+  --capsule-warning: rgba(216, 150, 62, 0.18);
+  --capsule-warning-text: #d8963e;
+
+  --shadow-bottombar: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+  --shadow-toast: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* ==========================================================================
+   磨砂玻璃模式（data-glass="on"；Tauri windowEffects = underWindowBackground）
+   · html/body/#root 透明，整窗由原生 vibrancy 模糊桌面
+   · 窗口根容器 alpha 0.42–0.46；行卡/面板/底栏/Sheet 提高 alpha 保证文字对比
+   · 浅色：根 rgba(250,250,249,.44) / 卡 rgba(255,255,255,.68)
+   · 深色：根 rgba(22,22,24,.46) / 卡 rgba(30,30,33,.64)
+   · 关闭设置即回退上方不透明 token
+   ========================================================================== */
+:root[data-glass="on"] {
+  --bg-window: rgba(250, 250, 249, 0.44);
+  --bg-content: transparent;
+  --panel: rgba(250, 250, 249, 0.72);
+  --panel-raised: rgba(255, 255, 255, 0.82);
+  --sidebar: rgba(240, 238, 235, 0.52);
+  --card: rgba(255, 255, 255, 0.68);
+  --card-inset: rgba(246, 245, 243, 0.56);
+  --field-bg: rgba(255, 255, 255, 0.76);
+  --hairline: rgba(0, 0, 0, 0.12);
+  --hairline-strong: rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme="dark"][data-glass="on"] {
+  --bg-window: rgba(22, 22, 24, 0.58);
+  --bg-content: transparent;
+  --panel: rgba(30, 30, 33, 0.86);
+  --panel-raised: rgba(44, 44, 47, 0.9);
+  --sidebar: rgba(26, 26, 28, 0.66);
+  --card: rgba(30, 30, 33, 0.78);
+  --card-inset: rgba(40, 40, 43, 0.68);
+  --field-bg: rgba(36, 36, 39, 0.86);
+  --hairline: rgba(255, 255, 255, 0.14);
+  --hairline-strong: rgba(255, 255, 255, 0.22);
+}
+
+/* Windows：原生 caption 高 32px，自绘标题栏取 34px（macOS 保持 40px） */
+:root[data-os='windows'] {
+  --titlebar-h: 34px;
+}

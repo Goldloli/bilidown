@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90" width="640" height="360">
+  <defs>
+    <linearGradient id="city" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1b2a"/>
+      <stop offset="1" stop-color="#274060"/>
+    </linearGradient>
+  </defs>
+  <rect width="160" height="90" fill="url(#city)"/>
+  <g fill="#f2c66d" opacity="0.75">
+    <rect x="10" y="44" width="6" height="30"/><rect x="24" y="36" width="8" height="38"/>
+    <rect x="40" y="50" width="5" height="24"/><rect x="52" y="28" width="9" height="46"/>
+    <rect x="70" y="42" width="6" height="32"/><rect x="84" y="34" width="10" height="40"/>
+    <rect x="102" y="48" width="7" height="26"/><rect x="118" y="30" width="12" height="44"/>
+    <rect x="138" y="46" width="8" height="28"/>
+  </g>
+  <g fill="#ffffff" opacity="0.35">
+    <rect x="26" y="42" width="2" height="2"/><rect x="55" y="34" width="2" height="2"/>
+    <rect x="88" y="40" width="2" height="2"/><rect x="122" y="36" width="2" height="2"/>
+    <rect x="142" y="52" width="2" height="2"/>
+  </g>
+  <circle cx="132" cy="18" r="6" fill="#fb7299" opacity="0.8"/>
+  <text x="10" y="15" font-family="-apple-system, sans-serif" font-size="8" fill="#cfe4ff" opacity="0.9">CITY · TIMELAPSE</text>
+</svg>

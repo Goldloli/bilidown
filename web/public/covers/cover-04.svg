@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90" width="640" height="360">
+  <rect width="160" height="90" fill="#0f2b28"/>
+  <g stroke="#37b39a" stroke-width="0.6" opacity="0.5">
+    <path d="M0 22 H160 M0 40 H160 M0 58 H160 M0 76 H160"/>
+    <path d="M24 0 V90 M60 0 V90 M96 0 V90 M132 0 V90"/>
+  </g>
+  <rect x="60" y="22" width="36" height="18" rx="3" fill="#37b39a" opacity="0.25"/>
+  <rect x="60" y="40" width="60" height="18" rx="3" fill="#fb7299" opacity="0.35"/>
+  <circle cx="126" cy="68" r="7" fill="#37b39a" opacity="0.85"/>
+  <text x="10" y="15" font-family="-apple-system, sans-serif" font-size="8" fill="#d7fff5" opacity="0.9">ENGINEERING · 03</text>
+</svg>

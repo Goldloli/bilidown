@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90" width="640" height="360">
+  <rect width="160" height="90" fill="#241a35"/>
+  <g stroke="#fb7299" stroke-width="0.8" opacity="0.55" fill="none">
+    <path d="M-10 70 Q20 30 50 60 T110 50 T190 64"/>
+    <path d="M-10 78 Q26 44 58 70 T118 62 T190 74"/>
+    <path d="M-10 58 Q14 22 46 48 T104 40 T190 52"/>
+  </g>
+  <g fill="#ffffff" opacity="0.9">
+    <circle cx="34" cy="30" r="3.2"/><circle cx="58" cy="18" r="2.2"/><circle cx="86" cy="26" r="2.8"/>
+  </g>
+  <rect x="112" y="20" width="2" height="36" rx="1" fill="#fb7299"/>
+  <text x="10" y="16" font-family="-apple-system, sans-serif" font-size="8" fill="#f5e8ff" opacity="0.9">HI-RES · 钢琴改编</text>
+</svg>
