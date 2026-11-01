@@ -70,7 +70,7 @@ jobs:
       - name: Report bundled ffmpeg metadata (macOS)
         if: runner.os == 'macOS'
         run: |
-          node -e 'const stamp=require("./src-tauri/binaries/macos/ffmpeg-aarch64-apple-darwin.build.json"); console.log(`ffmpeg=${stamp.ffmpeg.version} lame=${stamp.lame.version} buildConfig=${stamp.buildConfigSha256}`);'
+          node -e 'const stamp=require("./src-tauri/binaries/macos/ffmpeg-aarch64-apple-darwin.build.json"); console.log("ffmpeg=" + stamp.ffmpeg.version + " lame=" + stamp.lame.version + " buildConfig=" + stamp.buildConfigSha256);'
           src-tauri/binaries/macos/ffmpeg-aarch64-apple-darwin -hide_banner -version | sed -n '1,2p'
           stat -f 'sidecarBytes=%z' src-tauri/binaries/macos/ffmpeg-aarch64-apple-darwin
       - name: Build app and bundles
@@ -110,5 +110,5 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/*.dmg dist/*.exe dist/SHA256SUMS.txt \
             --title "bilidown ${GITHUB_REF_NAME}" \
-            --notes "Windows：下载 *-setup.exe（首发未签名，SmartScreen 选择「更多信息 → 仍要运行」；校验见 SHA256SUMS.txt）。macOS：下载并安装 *.dmg，已内置 ffmpeg，无需另装 Homebrew 或配置 PATH。" \
+            --notes-file ".github/release-notes/${GITHUB_REF_NAME}.md" \
             --verify-tag
