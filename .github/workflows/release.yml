@@ -109,13 +109,14 @@ jobs:
       - name: Checksums（统一多平台 SHA256SUMS.txt）
         run: |
           cd dist
-          sha256sum -- * > SHA256SUMS.txt
+          sha256sum dmg/*.dmg nsis/*.exe \
+            | sed -e 's#  dmg/#  #' -e 's#  nsis/#  #' > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Create / update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/*.dmg dist/*.exe dist/SHA256SUMS.txt \
+          gh release create "${GITHUB_REF_NAME}" dist/dmg/*.dmg dist/nsis/*.exe dist/SHA256SUMS.txt \
             --title "bilidown ${GITHUB_REF_NAME}" \
             --notes-file ".github/release-notes/${GITHUB_REF_NAME}.md" \
             --verify-tag
