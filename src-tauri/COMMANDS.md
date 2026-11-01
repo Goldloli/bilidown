@@ -185,7 +185,7 @@ cd "$RIDX" && for f in $(find .cache -type f); do dst="$CIDX/$f"; [ -f "$dst" ] 
 真实下载/登录联调时，在应用「设置 → 网络 → 代理」填 `http://127.0.0.1:7897`（Clash 本机端口；**仅本机测试，不要提交为默认值**），
 或在 LuLu 弹窗放行 `bilidown-app`。core 默认 `no_proxy()` 是刻意的（v1 起系统代理 CONNECT 会挂起）。
 
-**图标**：唯一母版为 `docs/design/app-icon.svg`；运行 `node scripts/generate-icons.mjs`（或 `pwsh -File scripts/make-ico.ps1`），复用已有 Playwright 与系统 Chrome，统一导出前端 SVG/PNG 和 Windows PNG/七尺寸 ICO（16/24/32/48/64/128/256）。也可设置 `ICON_BROWSER_CHANNEL=msedge` 使用已安装的 Edge。不从旧 PNG 生成，不改 ICNS/移动端图标；详细输出清单见 `docs/design/BRAND.md`。生成后重新构建 EXE/NSIS，并核对产物内嵌图标与运行时各入口。
+**图标**：唯一母版为 `assets/app-icon.svg`；运行 `node scripts/generate-icons.mjs`（或 `pwsh -File scripts/make-ico.ps1`），复用已有 Playwright 与系统 Chrome，统一导出前端 SVG/PNG 和 Windows PNG/七尺寸 ICO（16/24/32/48/64/128/256）。也可设置 `ICON_BROWSER_CHANNEL=msedge` 使用已安装的 Edge。不从旧 PNG 生成，不改 ICNS/移动端图标；详细输出清单见本地 `docs/design/BRAND.md`（不入库）。生成后重新构建 EXE/NSIS，并核对产物内嵌图标与运行时各入口。
 
 **devUrl**：`http://127.0.0.1:1420/`（vite `strictPort`），**frontendDist**：`../web/dist`。
 **dev 命令的 watcher 同时监听 `crates/bilidown-core`**，core 改动会自动重启 app。

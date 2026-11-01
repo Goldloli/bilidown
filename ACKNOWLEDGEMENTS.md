@@ -17,7 +17,7 @@ bilidown 的实现可独立复现，界面、图标与文案均为项目原创�
 
 ## 图标
 
-应用图标由项目作者使用 AI 图像工具生成并筛选定稿，源文件见 `docs/design/icons/v3-transparent/b-blue-tray-chip.png`。
+应用图标由项目作者使用 AI 图像工具生成并筛选定稿，可编辑母版见 `assets/app-icon.svg`。
 
 ## 许可
 
