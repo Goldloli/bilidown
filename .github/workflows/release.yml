@@ -77,7 +77,14 @@ jobs:
         run: pnpm tauri build --bundles ${{ matrix.bundles }}
       - name: Verify bundled ffmpeg package (macOS)
         if: runner.os == 'macOS'
-        run: node scripts/verify-ffmpeg-macos.mjs --app target/release/bundle/macos/bilidown.app --smoke
+        run: |
+          mount_dir="$RUNNER_TEMP/bilidown-dmg"
+          mkdir -p "$mount_dir"
+          dmg="$(find target/release/bundle/dmg -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir" -quiet || true' EXIT
+          node scripts/verify-ffmpeg-macos.mjs --app "$mount_dir/bilidown.app" --smoke
       - name: Report macOS package size
         if: runner.os == 'macOS'
         run: |
