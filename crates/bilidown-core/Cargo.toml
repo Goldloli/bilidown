@@ -20,7 +20,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 async-trait = "0.1"
 toml = "1.1"
-rand = "0.8"
+rand = "0.10"
 rsa = "0.9"
 hmac = "0.12"
 sha2 = "0.10"
