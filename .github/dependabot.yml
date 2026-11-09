@@ -1,14 +1,27 @@
+# Dependabot 版本更新配置
+#
+# 频率策略（已按 GitHub 当前支持的最高稳定频率配置）：
+# - schedule.interval 用 cron 而不是 daily：daily 只在周一至周五运行，
+#   周末发布的依赖要等到周一才会被检查；cron "0 9 * * *" 每天（含周末）检查一次，
+#   Cargo / npm / GitHub Actions 三个生态各跑一次。
+# - cooldown.default-days 压到允许的最小值 1：Dependabot 默认对新版本"冷却" 3 天后
+#   才开升级 PR，改成 1 天后新发布版本能更快进入 PR。
+# - open-pull-requests-limit 提到 10：避免待合入 PR 逼近默认上限 5 条后停止开新 PR。
+#
+# 安全更新（Dependabot alerts + security updates）已在本仓库开启，不受本文件调度影响。
 version: 2
 
 updates:
+  # Rust：根 Cargo.toml 是 workspace，覆盖 crates/bilidown-core 与 src-tauri
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
+      interval: "cron"
+      cronjob: "0 9 * * *" # 每天 09:00（含周末）
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 1
+    open-pull-requests-limit: 10
     rebase-strategy: "auto"
     commit-message:
       prefix: "chore(deps)"
@@ -20,14 +33,16 @@ updates:
           - "minor"
           - "patch"
 
+  # 前端：根 package.json + pnpm-lock.yaml（npm 生态原生支持 pnpm）
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
+      interval: "cron"
+      cronjob: "0 9 * * *" # 每天 09:00（含周末）
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 1
+    open-pull-requests-limit: 10
     rebase-strategy: "auto"
     commit-message:
       prefix: "chore(deps)"
@@ -39,14 +54,16 @@ updates:
           - "minor"
           - "patch"
 
+  # GitHub Actions：.github/workflows/*.yml 中引用的 action
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
+      interval: "cron"
+      cronjob: "0 9 * * *" # 每天 09:00（含周末）
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 1
+    open-pull-requests-limit: 10
     rebase-strategy: "auto"
     commit-message:
       prefix: "chore(deps)"
