@@ -1,6 +1,6 @@
 [package]
 name = "bilidown-app"
-version = "2.4.0"
+version = "2.4.1"
 edition = "2024"
 description = "bilidown desktop shell (Tauri 2)"
 license = "MIT"
