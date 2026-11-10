@@ -1035,6 +1035,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_settings_persists_proxy_change_without_blocking() {
+        let dir = unique_dir("proxy");
+        let core = test_core(&dir).await;
+        // 预置登录凭据：代理切换必须继承当前内存凭据（design D3/4.3）。
+        let mut creds = core.storage.load_credentials();
+        creds.cookies = vec![("SESSDATA".to_string(), "session-value".to_string())];
+        core.storage.save_credentials(&creds).unwrap();
+        let revision = core
+            .update_settings(|current| {
+                let mut next = current.clone();
+                next.proxy = Some("http://127.0.0.1:7897".into());
+                Ok(next)
+            })
+            .await
+            .unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(
+            core.settings().proxy.as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        assert_eq!(
+            core.storage.load_settings().proxy.as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        // 新 client 继承刚保存的 cookie，不被代理切换清空。
+        assert!(
+            core.client()
+                .cookies()
+                .cookies
+                .iter()
+                .any(|(name, value)| name == "SESSDATA" && value == "session-value")
+        );
+        core.manager.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn update_settings_serializes_concurrent_patches() {
         let dir = unique_dir("commit");
         let core = test_core(&dir).await;
