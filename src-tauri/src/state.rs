@@ -763,7 +763,7 @@ fn notify(app: &AppHandle, core: &Arc<Core>, success: bool, title: &str, error: 
 /// 任务栏进度条：Windows 用 Tauri 内置 `set_progress_bar` 展示整体下载进度。
 /// 任务栏进度签名：只有签名变化才更新系统任务栏（design D10/7.5）。
 #[cfg(target_os = "windows")]
-fn taskbar_signature(snapshot: &QueueSnapshot) -> (u64, u64, usize) {
+fn taskbar_signature(snapshot: &QueueSnapshot) -> (u64, u64, u32) {
     let (done, total) = snapshot
         .tasks
         .iter()
