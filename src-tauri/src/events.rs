@@ -25,6 +25,8 @@ pub const SHELL_DRAG: &str = "shell://drag";
 pub const SHELL_DROP: &str = "shell://drop";
 /// 有活跃任务时请求退出（payload: QueueStatsDTO）
 pub const SHELL_QUIT_REQUESTED: &str = "shell://quit-requested";
+/// core 启动阶段（payload: CoreStatusDTO，design D5/5.2/5.4）
+pub const CORE_STATUS: &str = "shell://core-status";
 
 pub fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
     if let Err(err) = app.emit(event, payload) {

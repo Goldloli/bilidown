@@ -451,6 +451,19 @@ pub struct ProxyDTO {
     pub pass: Option<String>,
 }
 
+/// core 启动阶段事件（design D5/5.2/5.4）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreStatusDTO {
+    /// `local-ready` / `network-ready` / `network-degraded`
+    pub stage: String,
+    /// 本次网络准备使用的代次（旧结果不得覆盖新状态）
+    pub generation: u64,
+    /// 网络准备是否已降级（离线/弱网仍可查看本地内容）
+    pub degraded: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsDTO {
@@ -483,6 +496,9 @@ pub struct SettingsDTO {
     pub keep_queue_on_exit: Option<bool>,
     pub ffmpeg_detected: Option<bool>,
     pub ffmpeg_version: Option<String>,
+    /// 设置修订号（design D3）：同一进程内单调递增，供前端丢弃乱序响应/事件。
+    #[serde(default)]
+    pub revision: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,6 +1377,7 @@ pub fn settings_dto(settings: &Settings) -> SettingsDTO {
         keep_queue_on_exit: Some(true),
         ffmpeg_detected: Some(ffmpeg_detected),
         ffmpeg_version,
+        revision: None,
     }
 }
 
@@ -1414,6 +1431,125 @@ pub fn settings_from_dto(dto: &SettingsDTO, previous: &Settings) -> Settings {
         quality_fallback: dto.quality_fallback.unwrap_or(previous.quality_fallback),
         window_glass: dto.glass_background.unwrap_or(previous.window_glass),
     }
+}
+
+/// 设置增量提交（design D3）：只包含可编辑业务字段；省略 = 保持，null = 清空可空字段。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SettingsPatchDTO {
+    #[serde(default, deserialize_with = "double_option")]
+    pub download_dir: Option<Option<String>>,
+    pub max_concurrent: Option<usize>,
+    pub quality: Option<String>,
+    pub codec: Option<String>,
+    pub audio_format: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub ffmpeg_path: Option<Option<String>>,
+    /// 省略 = 保持；`{"mode":"direct"}` 表示切回直连（design D4 代理草稿）。
+    pub proxy: Option<ProxyDTO>,
+    pub theme: Option<String>,
+    pub notifications: Option<bool>,
+    pub watch_clipboard: Option<bool>,
+    pub history_limit: Option<usize>,
+    pub write_metadata: Option<bool>,
+    pub download_subtitle: Option<bool>,
+    pub download_cover: Option<bool>,
+    pub check_updates_on_startup: Option<bool>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub accent_color: Option<Option<String>>,
+    pub motion: Option<String>,
+    pub quality_fallback: Option<bool>,
+    pub glass_background: Option<bool>,
+}
+
+/// 区分「字段省略」与「显式 null」（design D3）。
+fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
+}
+
+/// 把补丁合并到当前有效设置上；只改补丁显式包含的字段（design D3）。
+pub fn apply_settings_patch(patch: &SettingsPatchDTO, previous: &Settings) -> Settings {
+    let mut next = previous.clone();
+    if let Some(value) = &patch.download_dir {
+        next.download_dir = value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+    if let Some(value) = patch.max_concurrent {
+        // 不在合并阶段静默纠正：交给 Settings::validate 拒绝并提示（design D3）。
+        next.max_concurrent = value;
+    }
+    if let Some(value) = &patch.quality {
+        next.default_quality = quality_qn(value);
+    }
+    if let Some(value) = &patch.codec {
+        next.default_codec = if value.eq_ignore_ascii_case("best") || value.eq_ignore_ascii_case("auto")
+        {
+            None
+        } else {
+            codec_from_label(value)
+        };
+    }
+    if let Some(value) = &patch.audio_format {
+        next.audio_to_mp3 = value.eq_ignore_ascii_case("mp3");
+    }
+    if let Some(value) = &patch.ffmpeg_path {
+        next.ffmpeg_path = value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+    if let Some(value) = &patch.proxy {
+        next.proxy = proxy_url(value);
+    }
+    if let Some(value) = &patch.theme {
+        next.theme = theme_from_str(value);
+    }
+    if let Some(value) = patch.notifications {
+        next.notify_on_done = value;
+    }
+    if let Some(value) = patch.watch_clipboard {
+        next.watch_clipboard = value;
+    }
+    if let Some(value) = patch.history_limit {
+        next.history_limit = value;
+    }
+    if let Some(value) = patch.write_metadata {
+        next.write_metadata = value;
+    }
+    if let Some(value) = patch.download_subtitle {
+        next.download_subtitle = value;
+    }
+    if let Some(value) = patch.download_cover {
+        next.download_cover = value;
+    }
+    if let Some(value) = patch.check_updates_on_startup {
+        next.check_updates_on_startup = value;
+    }
+    if let Some(value) = &patch.accent_color {
+        // 非法值保留原样，由 validate 拒绝（不静默回退）。
+        next.accent_color = match value.as_deref().map(str::trim) {
+            Some("") | None => None,
+            Some(value) => Some(value.to_ascii_uppercase()),
+        };
+    }
+    if let Some(value) = &patch.motion {
+        next.motion = motion_from_str(value);
+    }
+    if let Some(value) = patch.quality_fallback {
+        next.quality_fallback = value;
+    }
+    if let Some(value) = patch.glass_background {
+        next.window_glass = value;
+    }
+    next
 }
 
 // ---------------------------------------------------------------------------
@@ -1552,6 +1688,89 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_patch_only_changes_present_fields() {
+        let previous = Settings {
+            max_concurrent: 3,
+            history_limit: 500,
+            theme: bilidown_core::ThemePreference::System,
+            ..Default::default()
+        };
+        // 只改并发：主题/历史等其他字段保持。
+        let patch: SettingsPatchDTO = serde_json::from_value(serde_json::json!({
+            "maxConcurrent": 5
+        }))
+        .unwrap();
+        let next = apply_settings_patch(&patch, &previous);
+        assert_eq!(next.max_concurrent, 5);
+        assert_eq!(next.history_limit, 500);
+        assert_eq!(next.theme, previous.theme);
+        assert_eq!(next.download_dir, previous.download_dir);
+
+        // 并发 + 主题连续修改都保留（design D3 原子 patch）。
+        let patch: SettingsPatchDTO = serde_json::from_value(serde_json::json!({
+            "theme": "dark",
+            "downloadSubtitle": true
+        }))
+        .unwrap();
+        let next = apply_settings_patch(&patch, &next);
+        assert_eq!(next.max_concurrent, 5);
+        assert!(next.download_subtitle);
+    }
+
+    #[test]
+    fn settings_patch_null_clears_nullable_fields() {
+        let previous = Settings {
+            download_dir: Some("/tmp/a".into()),
+            ffmpeg_path: Some("/opt/ffmpeg".into()),
+            accent_color: Some("#FB7299".into()),
+            proxy: Some("http://127.0.0.1:7897".into()),
+            ..Default::default()
+        };
+        // 显式 null 清空可空字段；proxy 用 mode=direct 切回直连。
+        let patch: SettingsPatchDTO = serde_json::from_value(serde_json::json!({
+            "downloadDir": null,
+            "ffmpegPath": null,
+            "accentColor": null,
+            "proxy": { "mode": "direct", "url": "" }
+        }))
+        .unwrap();
+        let next = apply_settings_patch(&patch, &previous);
+        assert!(next.download_dir.is_none());
+        assert!(next.ffmpeg_path.is_none());
+        assert!(next.accent_color.is_none());
+        assert!(next.proxy.is_none());
+        // 省略字段保持：再次 patch 空对象不改任何东西。
+        let empty: SettingsPatchDTO = serde_json::from_value(serde_json::json!({})).unwrap();
+        let again = apply_settings_patch(&empty, &next);
+        assert_eq!(again, next);
+    }
+
+    #[test]
+    fn settings_patch_invalid_values_are_rejected_by_validation() {
+        let previous = Settings::default();
+        for (json, field) in [
+            (serde_json::json!({"maxConcurrent": 0}), "max_concurrent"),
+            (serde_json::json!({"maxConcurrent": 9}), "max_concurrent"),
+            (serde_json::json!({"historyLimit": 3}), "history_limit"),
+            (
+                serde_json::json!({"proxy": {"mode": "manual", "host": "bad host"}}),
+                "proxy",
+            ),
+        ] {
+            let patch: SettingsPatchDTO = serde_json::from_value(json.clone()).unwrap();
+            let next = apply_settings_patch(&patch, &previous);
+            let errors = match next.validate() {
+                Err(errors) => errors,
+                Ok(()) => panic!("非法补丁未被拒绝: {json} -> {next:?}"),
+            };
+            assert!(
+                errors.iter().any(|error| error.field == field),
+                "缺失字段 {field}: {errors:?}"
+            );
+        }
+    }
 
     #[test]
     fn quality_qn_covers_all_ui_tiers() {

@@ -16,8 +16,9 @@ use bilidown_core::{
     TaskEvent, TaskManager, TaskManagerConfig, TaskPhase,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio::sync::watch;
 
@@ -38,6 +39,12 @@ pub struct Core {
     client: RwLock<Arc<BiliClient>>,
     pub manager: TaskManager,
     settings: RwLock<Settings>,
+    /// 设置提交串行化（design D3）：合并/校验/持久化/运行态替换在锁内完成。
+    settings_commit: tokio::sync::Mutex<()>,
+    /// 进程内单调递增的设置修订号（design D3）。
+    settings_revision: AtomicU64,
+    /// 网络准备代次（design D5/5.4）：旧结果不得覆盖新状态。
+    network_generation: AtomicU64,
     account: RwLock<AccountState>,
     /// 进行中的扫码登录流程（`account::login_poll` 需要 &mut）。
     login: Mutex<Option<QrLogin>>,
@@ -69,6 +76,64 @@ impl Core {
         if let Ok(mut guard) = self.settings.write() {
             *guard = settings;
         }
+    }
+
+    /// 当前设置修订号（design D3）。
+    pub fn settings_revision(&self) -> u64 {
+        self.settings_revision.load(Ordering::SeqCst)
+    }
+
+    /// 开始一次新的网络准备，返回其代次（design D5/5.4）。
+    pub fn begin_network_attempt(&self) -> u64 {
+        self.network_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn network_generation(&self) -> u64 {
+        self.network_generation.load(Ordering::SeqCst)
+    }
+
+    /// 串行提交设置：在锁内合并、校验、预构造资源、持久化，成功后才替换运行态。
+    /// 持久化失败时运行态不变；返回新的修订号（design D3）。
+    pub async fn update_settings<F>(&self, update: F) -> BiliResult<u64>
+    where
+        F: FnOnce(&Settings) -> BiliResult<Settings>,
+    {
+        let _guard = self.settings_commit.lock().await;
+        let previous = self.settings();
+        let next = update(&previous)?;
+        next.validate().map_err(|errors| {
+            BiliError::Other(
+                errors
+                    .iter()
+                    .map(|error| format!("{}: {}", error.field, error.message))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })?;
+        // 可能失败的本地资源先构造，失败时不做任何提交。
+        let rebuilt_client = if previous.proxy != next.proxy {
+            let creds = self.storage.load_credentials();
+            let client = Arc::new(BiliClient::new(next.proxy.as_deref(), creds.stored())?);
+            client.apply_device(&creds.device);
+            Some(client)
+        } else {
+            None
+        };
+        // 持久化失败：不提交、不改运行态（design D3/D8）。
+        self.storage.save_settings(&next)?;
+        self.set_settings(next.clone());
+        self.manager.set_settings(next).await?;
+        if let Some(client) = rebuilt_client {
+            self.manager.set_client(client.clone()).await?;
+            self.set_client(client.clone());
+            // 网络准备独立进行，不阻塞提交；失败只记录，后续请求可重试（design D3/5.2）。
+            tauri::async_runtime::spawn(async move {
+                client.activate_buvid().await;
+            });
+        }
+        let revision = self.settings_revision.fetch_add(1, Ordering::SeqCst) + 1;
+        tracing::info!(revision, "设置已提交");
+        Ok(revision)
     }
 
     pub fn account(&self) -> AccountState {
@@ -151,6 +216,8 @@ impl MenuCounts {
 pub struct ShellState {
     core: RwLock<Option<Arc<Core>>>,
     init: watch::Sender<InitState>,
+    /// 初始化进行中标记：避免重复 spawn（design D5/5.4 重试）。
+    init_running: AtomicBool,
     /// 退出保护：前端确认后置 true，避免 ExitRequested 再次拦截。
     quit_confirmed: AtomicBool,
 }
@@ -161,6 +228,7 @@ impl ShellState {
         Self {
             core: RwLock::new(None),
             init,
+            init_running: AtomicBool::new(false),
             quit_confirmed: AtomicBool::new(false),
         }
     }
@@ -204,6 +272,11 @@ impl ShellState {
         let _ = self.init.send(InitState::Failed(reason));
     }
 
+    /// 把初始化状态重置为进行中（前端「重试初始化」使用，design D5/5.4）。
+    pub fn reset_init(&self) {
+        let _ = self.init.send(InitState::Initializing);
+    }
+
     pub fn confirm_quit(&self) {
         self.quit_confirmed.store(true, Ordering::SeqCst);
     }
@@ -235,24 +308,38 @@ impl Default for ShellState {
 // 初始化
 // ---------------------------------------------------------------------------
 
-/// 启动后台初始化（窗口已出现，命令会等待就绪）。
+/// 启动后台初始化：先完成本地阶段并唤醒等待命令，再独立进行网络阶段（design D5/5.1/5.2）。
 pub fn spawn_init(app: AppHandle) {
+    {
+        let state = app.state::<ShellState>();
+        if state
+            .init_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::info!(target: "shell::app", "初始化已在进行中，忽略重复请求");
+            return;
+        }
+        state.reset_init();
+    }
     tauri::async_runtime::spawn(async move {
-        tracing::info!(target: "shell::app", "开始初始化 core");
-        match init_core().await {
+        tracing::info!(target: "shell::app", "开始初始化 core（本地阶段）");
+        match init_local_core().await {
             Ok(core) => {
                 tracing::info!(
                     target: "shell::app",
                     data_dir = %core.paths.root().display(),
                     log_dir = %core.paths.logs_dir().display(),
-                    "core ready"
+                    "core 本地阶段就绪"
                 );
                 let state = app.state::<ShellState>();
+                state.init_running.store(false, Ordering::SeqCst);
                 state.set_core(core.clone());
                 spawn_snapshot_bridge(&app, &core);
                 spawn_event_bridge(&app, &core);
                 spawn_clipboard_watch(&app);
 
+                // 本地数据（队列/设置/历史/账号快照）先发布，界面无需等待网络。
                 let snapshot = core.snapshot();
                 let account = core.account();
                 let settings = core.settings();
@@ -262,20 +349,83 @@ pub fn spawn_init(app: AppHandle) {
                     dto::snapshot_dto(&snapshot, &account, &settings),
                 );
                 events::emit(&app, events::ACCOUNT_CHANGED, dto::account_dto(&account));
-                events::emit(&app, events::SETTINGS_CHANGED, dto::settings_dto(&settings));
+                let mut dto = dto::settings_dto(&settings);
+                dto.revision = Some(core.settings_revision());
+                events::emit(&app, events::SETTINGS_CHANGED, dto);
                 publish_history(&app);
                 menu::refresh(&app);
                 dock::update(&app, core.running_count());
+                events::emit(
+                    &app,
+                    events::CORE_STATUS,
+                    dto::CoreStatusDTO {
+                        stage: "local-ready".into(),
+                        generation: core.network_generation(),
+                        degraded: false,
+                        error: None,
+                    },
+                );
 
                 let restored = snapshot.tasks.iter().filter(|t| t.restored).count();
                 let message = if restored > 0 {
-                    format!("引擎就绪（从上次退出恢复 {restored} 个任务，已暂停）")
+                    format!("本地数据已就绪（从上次退出恢复 {restored} 个任务，已暂停）")
                 } else {
-                    "引擎就绪".to_string()
+                    "本地数据已就绪".to_string()
                 };
                 events::notice(&app, "info", message);
 
-                match account {
+                // 封面缓存剪枝改为后台执行，不阻塞本地就绪（design D5）。
+                let covers = core.paths.covers_dir();
+                tauri::async_runtime::spawn_blocking(move || {
+                    crate::covers::prune(&covers, 30, 500);
+                });
+
+                spawn_network_phase(app.clone(), core.clone());
+            }
+            Err(err) => {
+                tracing::error!(target: "shell::app", error = %err.describe(), "core 本地阶段初始化失败");
+                let state = app.state::<ShellState>();
+                state.init_running.store(false, Ordering::SeqCst);
+                state.mark_failed(err.describe());
+                events::notice(&app, "error", format!("引擎初始化失败：{}", err.describe()));
+            }
+        }
+    });
+}
+
+/// 网络阶段：5 秒预算内完成设备激活与账号恢复；超时降级但本地内容可继续使用（design D5/5.2）。
+pub(crate) fn spawn_network_phase(app: AppHandle, core: Arc<Core>) {
+    tauri::async_runtime::spawn(async move {
+        let generation = core.begin_network_attempt();
+        let client = core.client();
+        let storage = Arc::clone(&core.storage);
+        let prepared = tokio::time::timeout(Duration::from_secs(5), async move {
+            client.activate_buvid().await;
+            let account_state = account::restore(&client, &storage).await;
+            let _ = account::persist_device(&client, &storage).await;
+            account_state
+        })
+        .await;
+        // 代次保护：旧结果不得覆盖较新的重试结果（design D5/5.4）。
+        if core.network_generation() != generation {
+            tracing::info!(target: "shell::app", generation, "网络准备结果过期，丢弃");
+            return;
+        }
+        match prepared {
+            Ok(account_state) => {
+                core.set_account(account_state.clone());
+                events::emit(&app, events::ACCOUNT_CHANGED, dto::account_dto(&account_state));
+                events::emit(
+                    &app,
+                    events::CORE_STATUS,
+                    dto::CoreStatusDTO {
+                        stage: "network-ready".into(),
+                        generation,
+                        degraded: false,
+                        error: None,
+                    },
+                );
+                match account_state {
                     a if a.logged_in => {
                         events::notice(&app, "info", format!("已登录：{}", a.user.uname));
                     }
@@ -284,38 +434,92 @@ pub fn spawn_init(app: AppHandle) {
                     }
                     _ => {}
                 }
-
-                // 启动时检查更新（core Settings.check_updates_on_startup；仅静默检查，
-                // 不发通知、不自动下载；失败只 warn，不阻塞主流程）。
-                if settings.check_updates_on_startup {
-                    let handle = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        match crate::update::check_in_background(handle).await {
-                            Ok(check) => tracing::info!(
-                                target: "shell::update",
-                                update_available = check.update_available,
-                                version = check.release.as_ref().map(|release| release.version.clone()),
-                                "启动时检查更新完成"
-                            ),
-                            Err(err) => tracing::warn!(
-                                target: "shell::update",
-                                error = %err,
-                                "启动时检查更新失败"
-                            ),
-                        }
-                    });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "shell::app",
+                    "网络准备未在 5 秒预算内完成，进入降级可用状态"
+                );
+                events::emit(
+                    &app,
+                    events::CORE_STATUS,
+                    dto::CoreStatusDTO {
+                        stage: "network-degraded".into(),
+                        generation,
+                        degraded: true,
+                        error: Some("网络准备超时，本地内容可继续使用；稍后会自动重试".into()),
+                    },
+                );
+                events::notice(
+                    &app,
+                    "warning",
+                    "网络准备较慢，本地内容可继续使用，稍后自动重试",
+                );
+                let retry_app = app.clone();
+                let retry_core = Arc::clone(&core);
+                tauri::async_runtime::spawn(async move {
+                    resume_network_phase(retry_app, retry_core).await;
+                });
+            }
+        }
+        // 凭据已在本地阶段装载；无论网络成功或降级都允许调度，避免队列永久停摆。
+        if let Err(error) = core.manager.enable_scheduling().await {
+            tracing::warn!(target: "shell::app", error = %error, "启用传输调度失败");
+        }
+        if core.settings().check_updates_on_startup {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::update::check_in_background(handle).await {
+                    Ok(check) => tracing::info!(
+                        target: "shell::update",
+                        update_available = check.update_available,
+                        version = check.release.as_ref().map(|release| release.version.clone()),
+                        "启动时检查更新完成"
+                    ),
+                    Err(err) => tracing::warn!(
+                        target: "shell::update",
+                        error = %err,
+                        "启动时检查更新失败"
+                    ),
                 }
-            }
-            Err(err) => {
-                tracing::error!(target: "shell::app", error = %err.describe(), "core 初始化失败");
-                app.state::<ShellState>().mark_failed(err.describe());
-                events::notice(&app, "error", format!("引擎初始化失败：{}", err.describe()));
-            }
+            });
         }
     });
 }
 
-async fn init_core() -> BiliResult<Arc<Core>> {
+/// 降级后的后台重试：成功才应用账号状态，失败只记录（design D5/5.4）。
+async fn resume_network_phase(app: AppHandle, core: Arc<Core>) {
+    let generation = core.begin_network_attempt();
+    let client = core.client();
+    let storage = Arc::clone(&core.storage);
+    let prepared = tokio::time::timeout(Duration::from_secs(15), async move {
+        client.activate_buvid().await;
+        let account_state = account::restore(&client, &storage).await;
+        let _ = account::persist_device(&client, &storage).await;
+        account_state
+    })
+    .await;
+    if core.network_generation() != generation {
+        return;
+    }
+    if let Ok(account_state) = prepared {
+        core.set_account(account_state.clone());
+        events::emit(&app, events::ACCOUNT_CHANGED, dto::account_dto(&account_state));
+        events::emit(
+            &app,
+            events::CORE_STATUS,
+            dto::CoreStatusDTO {
+                stage: "network-ready".into(),
+                generation,
+                degraded: false,
+                error: None,
+            },
+        );
+    }
+}
+
+/// 本地阶段：只读路径/存储/凭据与设置并恢复队列，不等待任何外网请求（design D5/5.2）。
+async fn init_local_core() -> BiliResult<Arc<Core>> {
     let paths = AppPaths::standard()?;
     // 日志尽早初始化（core 的 tracing subscriber，写 <data>/logs/）
     let _ = crate::logging::init_tracing(&paths);
@@ -329,22 +533,14 @@ async fn init_core() -> BiliResult<Arc<Core>> {
         "storage ready"
     );
 
+    // 只做离线构造：cookie/device 来自本地存储，网络激活放到网络阶段。
     let client = Arc::new(BiliClient::new(settings.proxy.as_deref(), creds.stored())?);
     client.apply_device(&creds.device);
-    client.activate_buvid().await;
 
-    // 封面缓存清理：保留 30 天、上限 500 张（启动时一次）
-    crate::covers::prune(&paths.covers_dir(), 30, 500);
-
-    let account_state = account::restore(&client, &storage).await;
-    let _ = account::persist_device(&client, &storage).await;
-
-    let manager = TaskManager::start(TaskManagerConfig::new(
-        client.clone(),
-        storage.clone(),
-        settings.clone(),
-    ))
-    .await?;
+    let mut config = TaskManagerConfig::new(client.clone(), storage.clone(), settings.clone());
+    // 启动分阶段：先把队列恢复为 Queued 但暂不调度，网络准备结束后再启用。
+    config.startup_defer_schedule = true;
+    let manager = TaskManager::start(config).await?;
 
     Ok(Arc::new(Core {
         paths: storage.paths().clone(),
@@ -352,7 +548,10 @@ async fn init_core() -> BiliResult<Arc<Core>> {
         client: RwLock::new(client),
         manager,
         settings: RwLock::new(settings),
-        account: RwLock::new(account_state),
+        settings_commit: tokio::sync::Mutex::new(()),
+        settings_revision: AtomicU64::new(0),
+        network_generation: AtomicU64::new(0),
+        account: RwLock::new(AccountState::default()),
         login: Mutex::new(None),
     }))
 }
@@ -519,11 +718,9 @@ pub fn publish_account(app: &AppHandle, core: &Arc<Core>) {
 }
 
 pub fn publish_settings(app: &AppHandle, core: &Arc<Core>) {
-    events::emit(
-        app,
-        events::SETTINGS_CHANGED,
-        dto::settings_dto(&core.settings()),
-    );
+    let mut settings = dto::settings_dto(&core.settings());
+    settings.revision = Some(core.settings_revision());
+    events::emit(app, events::SETTINGS_CHANGED, settings);
 }
 
 /// 历史变化：payload 为完整 DTO 数组（web bootstrap 直接 setEntries）。

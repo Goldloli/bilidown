@@ -6,7 +6,7 @@ use bilidown_core::api::account::{self, AccountState};
 use bilidown_core::api::types::{BiliId, Content, PlayUrl, TaskSpec};
 use bilidown_core::api::{audio, parse, video};
 use bilidown_core::media::ffmpeg::Ffmpeg;
-use bilidown_core::storage::{HistoryQuery, Settings};
+use bilidown_core::storage::HistoryQuery;
 use bilidown_core::{BiliError, HistoryRecord, QueueSnapshot};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -226,6 +226,24 @@ pub async fn force_quit_app(app: AppHandle, state: State<'_, ShellState>) -> Com
     }
     tracing::warn!(target: "shell::app", "用户选择放弃未保存状态并退出");
     app.exit(0);
+    Ok(())
+}
+
+/// 本地初始化失败后重试（design D5/5.4）：仅在 core 尚未就绪时重新拉起初始化。
+#[tauri::command]
+pub async fn retry_init(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    if state.try_core().is_some() {
+        return Ok(());
+    }
+    state::spawn_init(app);
+    Ok(())
+}
+
+/// 网络阶段重试（design D5/5.2/5.4）：本地已就绪时重新尝试设备激活与账号恢复。
+#[tauri::command]
+pub async fn retry_network(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    let core = core_of(&state).await?;
+    state::spawn_network_phase(app, core);
     Ok(())
 }
 
@@ -591,7 +609,10 @@ pub async fn refresh_account(
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, ShellState>) -> CommandResult<SettingsDTO> {
-    Ok(settings_dto(&core_of(&state).await?.settings()))
+    let core = core_of(&state).await?;
+    let mut settings = settings_dto(&core.settings());
+    settings.revision = Some(core.settings_revision());
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -601,47 +622,41 @@ pub async fn set_settings(
     settings: SettingsDTO,
 ) -> CommandResult<SettingsDTO> {
     let core = core_of(&state).await?;
-    let previous: Settings = core.settings();
+    // 兼容入口：完整替换仍走同一提交协调器（design D3）。
+    let previous = core.settings();
     let applied = settings_from_dto(&settings, &previous);
-    if let Err(errors) = applied.validate() {
-        tracing::warn!(target: "shell::settings", ?errors, "设置校验失败");
-        return Err(AppErrorDTO {
-            kind: "parse".into(),
-            message: errors
-                .iter()
-                .map(|error| format!("{}: {}", error.field, error.message))
-                .collect::<Vec<_>>()
-                .join("; "),
-            actions: vec!["open-settings".into()],
-        });
-    }
-    core.storage
-        .save_settings(&applied)
-        .map_err(AppErrorDTO::from)?;
-    // 代理变化：重建 BiliClient（cookie 从凭据文件迁移）
-    if previous.proxy != applied.proxy {
-        let creds = core.storage.load_credentials();
-        let client = Arc::new(
-            bilidown_core::BiliClient::new(applied.proxy.as_deref(), creds.stored())
-                .map_err(AppErrorDTO::from)?,
-        );
-        client.apply_device(&creds.device);
-        client.activate_buvid().await;
-        core.manager
-            .set_client(client.clone())
-            .await
-            .map_err(AppErrorDTO::from)?;
-        core.set_client(client);
-        tracing::info!(target: "shell::settings", "代理变化，已重建 HTTP client");
-    }
-    core.manager
-        .set_settings(applied.clone())
+    let revision = core
+        .update_settings(|_| Ok(applied.clone()))
         .await
         .map_err(AppErrorDTO::from)?;
-    core.set_settings(applied.clone());
     state::publish_settings(&app, &core);
-    tracing::info!(target: "shell::settings", max_concurrent = applied.max_concurrent, "设置已保存并热更新");
-    Ok(settings_dto(&applied))
+    tracing::info!(
+        target: "shell::settings",
+        revision,
+        max_concurrent = applied.max_concurrent,
+        "设置已保存并热更新"
+    );
+    let mut dto = settings_dto(&applied);
+    dto.revision = Some(revision);
+    Ok(dto)
+}
+
+/// 增量提交设置（design D3）：省略字段保持不变、null 清空可空字段；返回新修订号。
+#[tauri::command]
+pub async fn patch_settings(
+    app: AppHandle,
+    state: State<'_, ShellState>,
+    patch: SettingsPatchDTO,
+) -> CommandResult<SettingsDTO> {
+    let core = core_of(&state).await?;
+    let revision = core
+        .update_settings(|current| Ok(apply_settings_patch(&patch, current)))
+        .await
+        .map_err(AppErrorDTO::from)?;
+    state::publish_settings(&app, &core);
+    let mut dto = settings_dto(&core.settings());
+    dto.revision = Some(revision);
+    Ok(dto)
 }
 
 // ---------------------------------------------------------------------------

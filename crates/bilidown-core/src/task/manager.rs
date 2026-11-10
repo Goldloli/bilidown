@@ -60,6 +60,9 @@ pub struct TaskManagerConfig {
     pub artifact_store_fail_once: Option<Arc<AtomicBool>>,
     /// 测试注入：下一次批量入队写库失败（design D8/3.4 故障注入）。
     pub enqueue_store_fail_once: Option<Arc<AtomicBool>>,
+    /// 启动分阶段（design D5/5.2）：true 时先恢复队列但不调度，等网络准备结束再
+    /// `enable_scheduling()`，避免凭据/代理未就绪就发起传输。
+    pub startup_defer_schedule: bool,
 }
 
 impl TaskManagerConfig {
@@ -74,6 +77,7 @@ impl TaskManagerConfig {
             download_http: None,
             artifact_store_fail_once: None,
             enqueue_store_fail_once: None,
+            startup_defer_schedule: false,
         }
     }
 }
@@ -170,6 +174,7 @@ impl TaskManager {
             worker_tx,
             artifact_store_fail_once: config.artifact_store_fail_once,
             enqueue_store_fail_once: config.enqueue_store_fail_once,
+            schedule_enabled: !config.startup_defer_schedule,
         };
         let mut inner = inner;
         // 恢复顺序与已加载顺序一致
@@ -296,6 +301,12 @@ impl TaskManager {
             .await
     }
 
+    /// 启用传输调度（启动分阶段：本地就绪后由网络准备结果触发，design D5/5.2）。
+    pub async fn enable_scheduling(&self) -> BiliResult<()> {
+        self.call(|reply| ManagerCommand::EnableScheduling { reply })
+            .await
+    }
+
     /// 退出准备：暂停进行中任务并落盘；失败返回错误且可再次调用重试（design D8/3.9）。
     pub async fn prepare_shutdown(&self) -> BiliResult<()> {
         self.call(|reply| ManagerCommand::PrepareShutdown { reply })
@@ -387,6 +398,10 @@ enum ManagerCommand {
     RetryPersistence {
         reply: oneshot::Sender<BiliResult<()>>,
     },
+    /// 启动分阶段：首次网络准备结束后启用传输调度（design D5/5.2）。
+    EnableScheduling {
+        reply: oneshot::Sender<BiliResult<()>>,
+    },
     /// 退出准备：暂停并把最终状态落盘（可重试）；失败时不退出（design D8/3.9）。
     PrepareShutdown {
         reply: oneshot::Sender<BiliResult<()>>,
@@ -444,6 +459,8 @@ struct Inner {
     worker_tx: mpsc::UnboundedSender<WorkerEvent>,
     artifact_store_fail_once: Option<Arc<AtomicBool>>,
     enqueue_store_fail_once: Option<Arc<AtomicBool>>,
+    /// 调度开关（启动分阶段期间为 false，design D5/5.2）。
+    schedule_enabled: bool,
 }
 
 impl Inner {
@@ -555,6 +572,9 @@ impl Inner {
     }
 
     fn schedule(&mut self) {
+        if !self.schedule_enabled {
+            return;
+        }
         loop {
             if self.workers.len() >= self.settings.max_concurrent.clamp(1, MAX_CONCURRENT) {
                 break;
@@ -757,6 +777,12 @@ impl Inner {
             ManagerCommand::RetryPersistence { reply } => {
                 let result = self.retry_persistence().await;
                 let _ = reply.send(result);
+            }
+            ManagerCommand::EnableScheduling { reply } => {
+                self.schedule_enabled = true;
+                self.schedule();
+                self.publish();
+                let _ = reply.send(Ok(()));
             }
             ManagerCommand::PrepareShutdown { reply } => {
                 // 暂停进行中任务并把最终状态落盘；失败时保留可重试状态、不退出（design D8/3.9）。
@@ -2042,6 +2068,7 @@ mod tests {
             download_http: Some(reqwest::Client::new()),
             artifact_store_fail_once,
             enqueue_store_fail_once,
+            startup_defer_schedule: false,
         };
         let manager = TaskManager::start(config).await.unwrap();
         Harness {
@@ -2379,6 +2406,7 @@ mod tests {
             download_http: Some(reqwest::Client::new()),
             artifact_store_fail_once: None,
             enqueue_store_fail_once: None,
+            startup_defer_schedule: false,
         })
         .await
         .unwrap();
@@ -2437,6 +2465,7 @@ mod tests {
             download_http: Some(reqwest::Client::new()),
             artifact_store_fail_once: None,
             enqueue_store_fail_once: None,
+            startup_defer_schedule: false,
         })
         .await
         .unwrap();
@@ -2839,6 +2868,7 @@ mod tests {
                 download_http: Some(reqwest::Client::new()),
                 artifact_store_fail_once: None,
                 enqueue_store_fail_once: None,
+                startup_defer_schedule: false,
             })
             .await
             .unwrap()
@@ -2917,6 +2947,7 @@ mod tests {
                 download_http: Some(reqwest::Client::new()),
                 artifact_store_fail_once: None,
                 enqueue_store_fail_once: None,
+                startup_defer_schedule: false,
             })
             .await
             .unwrap();
@@ -3177,6 +3208,43 @@ mod tests {
         let retry = h.manager.clear_inactive().await.unwrap();
         assert_eq!(retry.removed, 1);
         h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deferred_schedule_waits_for_network_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().join("data"));
+        let storage = Arc::new(Storage::open_with_legacy(paths, None).unwrap());
+        let manager = TaskManager::start(TaskManagerConfig {
+            client: Arc::new(BiliClient::new(None, Default::default()).unwrap()),
+            storage: Arc::clone(&storage),
+            settings: Settings::default(),
+            ffmpeg: None,
+            runner: Some(Arc::new(MockRunner {
+                behavior: Arc::new(behavior_default()),
+                active: Arc::new(AtomicUsize::new(0)),
+                max_active: Arc::new(AtomicUsize::new(0)),
+            })),
+            download_http: Some(reqwest::Client::new()),
+            artifact_store_fail_once: None,
+            enqueue_store_fail_once: None,
+            startup_defer_schedule: true,
+        })
+        .await
+        .unwrap();
+        let id = manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(
+            manager.snapshot().tasks[0].phase,
+            TaskPhase::Queued,
+            "本地就绪阶段不得开始传输"
+        );
+        manager.enable_scheduling().await.unwrap();
+        wait_for(&manager, |s| {
+            s.tasks.iter().any(|t| t.id == id && t.phase.is_active() || t.phase == TaskPhase::Done)
+        })
+        .await;
+        manager.shutdown().await.unwrap();
     }
 
     trait NoSpeed {

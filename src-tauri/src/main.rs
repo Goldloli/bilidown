@@ -80,6 +80,8 @@ fn main() {
         commands::open_preferences,
         commands::quit_app,
         commands::get_diagnostics,
+        commands::retry_init,
+        commands::retry_network,
         maintenance::get_storage_stats,
         maintenance::clear_app_cache,
         maintenance::open_data_dir,
@@ -107,6 +109,7 @@ fn main() {
         commands::refresh_account,
         // 设置
         commands::get_settings,
+        commands::patch_settings,
         commands::set_settings,
         // 历史
         commands::list_history,
@@ -148,6 +151,8 @@ fn main() {
         commands::open_preferences,
         commands::quit_app,
         commands::get_diagnostics,
+        commands::retry_init,
+        commands::retry_network,
         maintenance::get_storage_stats,
         maintenance::clear_app_cache,
         maintenance::open_data_dir,
@@ -172,6 +177,7 @@ fn main() {
         commands::login_logout,
         commands::refresh_account,
         commands::get_settings,
+        commands::patch_settings,
         commands::set_settings,
         commands::list_history,
         commands::remove_history,
