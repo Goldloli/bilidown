@@ -134,6 +134,9 @@ pub struct TaskView {
     /// 可选后处理产物（字幕/封面；失败不影响主任务）。旧数据反序列化时为空。
     #[serde(default)]
     pub extras: TaskExtras,
+    /// 记录保存失败的可见状态（design D8/3.8）；成功后清空。旧数据反序列化为 None。
+    #[serde(default)]
+    pub persist_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -182,6 +185,33 @@ impl TaskExtras {
     }
 }
 
+/// 持久化任务元信息（design D7）：只保存无法从请求参数或产物重算的展示事实。
+///
+/// 旧数据库记录没有该列内容（`{}`）；损坏或未知版本时只丢失元信息，任务本体仍可恢复。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TaskMetadata {
+    /// 元信息结构版本；0 = 旧记录/未写入。
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub upper: String,
+    #[serde(default)]
+    pub entries: Vec<String>,
+    #[serde(default)]
+    pub selected_entries: Vec<usize>,
+    #[serde(default)]
+    pub actual_quality: Option<Quality>,
+    #[serde(default)]
+    pub actual_codec: Option<Codec>,
+    #[serde(default)]
+    pub actual_audio: Option<AudioQuality>,
+    #[serde(default)]
+    pub extras: TaskExtras,
+}
+
+/// 当前任务元信息结构版本。
+pub const TASK_METADATA_VERSION: u32 = 1;
+
 fn merge_errors(current: Option<String>, incoming: Option<String>) -> Option<String> {
     match (current, incoming) {
         (Some(a), Some(b)) => Some(format!("{a}; {b}")),
@@ -191,6 +221,31 @@ fn merge_errors(current: Option<String>, incoming: Option<String>) -> Option<Str
 }
 
 impl TaskView {
+    /// 可持久化的元信息快照（design D7）。
+    pub fn metadata(&self) -> TaskMetadata {
+        TaskMetadata {
+            version: TASK_METADATA_VERSION,
+            upper: self.upper.clone(),
+            entries: self.entries.clone(),
+            selected_entries: self.selected_entries.clone(),
+            actual_quality: self.actual_quality,
+            actual_codec: self.actual_codec,
+            actual_audio: self.actual_audio,
+            extras: self.extras.clone(),
+        }
+    }
+
+    /// 应用恢复出的元信息；只覆盖元信息字段，不伪造缺失值（design D7）。
+    pub fn apply_metadata(&mut self, metadata: TaskMetadata) {
+        self.upper = metadata.upper;
+        self.entries = metadata.entries;
+        self.selected_entries = metadata.selected_entries;
+        self.actual_quality = metadata.actual_quality;
+        self.actual_codec = metadata.actual_codec;
+        self.actual_audio = metadata.actual_audio;
+        self.extras = metadata.extras;
+    }
+
     pub fn new(spec: TaskSpec) -> Self {
         let now = now_ms();
         Self {
@@ -215,6 +270,7 @@ impl TaskView {
             actual_codec: None,
             actual_audio: None,
             extras: TaskExtras::default(),
+            persist_error: None,
             spec,
             created_at: now,
             updated_at: now,

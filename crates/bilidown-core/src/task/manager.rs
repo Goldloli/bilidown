@@ -23,8 +23,8 @@ use crate::storage::{Db, HistoryRecord, Settings, Storage, TaskRecord};
 use super::event::TaskEvent;
 use super::pipeline::{DownloadPipeline, TaskReporter, TaskRunCtx, TaskRunner};
 use super::state::{
-    DownloadArtifact, QueueSnapshot, TaskId, TaskMeta, TaskOutcome, TaskPhase, TaskResume,
-    TaskView, WorkerEvent, completed_entry_indices, now_ms,
+    DownloadArtifact, QueueSnapshot, TaskId, TaskMeta, TaskMetadata, TaskOutcome, TaskPhase,
+    TaskResume, TaskView, TASK_METADATA_VERSION, WorkerEvent, completed_entry_indices, now_ms,
 };
 
 /// 并发上限（设置允许 1–8）。
@@ -57,6 +57,8 @@ pub struct TaskManagerConfig {
     pub download_http: Option<reqwest::Client>,
     /// 测试注入：下一次产物 checkpoint 写库失败。
     pub artifact_store_fail_once: Option<Arc<AtomicBool>>,
+    /// 测试注入：下一次批量入队写库失败（design D8/3.4 故障注入）。
+    pub enqueue_store_fail_once: Option<Arc<AtomicBool>>,
 }
 
 impl TaskManagerConfig {
@@ -70,6 +72,7 @@ impl TaskManagerConfig {
             runner: None,
             download_http: None,
             artifact_store_fail_once: None,
+            enqueue_store_fail_once: None,
         }
     }
 }
@@ -151,6 +154,9 @@ impl TaskManager {
             tails: HashMap::new(),
             pending_cleanups: Vec::new(),
             last_cleanup_retry: Instant::now(),
+            pending_completion: HashMap::new(),
+            pending_history: HashMap::new(),
+            flush_backoff: PROGRESS_FLUSH_INTERVAL,
             sem: Arc::new(Semaphore::new(MAX_CONCURRENT)),
             reduction_permits: Vec::new(),
             dirty: HashSet::new(),
@@ -162,6 +168,7 @@ impl TaskManager {
             event_tx: event_tx.clone(),
             worker_tx,
             artifact_store_fail_once: config.artifact_store_fail_once,
+            enqueue_store_fail_once: config.enqueue_store_fail_once,
         };
         let mut inner = inner;
         // 恢复顺序与已加载顺序一致
@@ -276,10 +283,21 @@ impl TaskManager {
             .await
     }
 
-    /// 优雅退出：暂停进行中任务并落盘，等待 worker 结束。
-    pub async fn shutdown(&self) -> BiliResult<()> {
-        self.call(|reply| ManagerCommand::Shutdown { reply })
-            .await?;
+    /// 重试所有待保存动作（完成事务、历史与任务记录），失败时保留可重试状态（design D8/3.8）。
+    pub async fn retry_persistence(&self) -> BiliResult<()> {
+        self.call(|reply| ManagerCommand::RetryPersistence { reply })
+            .await
+    }
+
+    /// 退出准备：暂停进行中任务并落盘；失败返回错误且可再次调用重试（design D8/3.9）。
+    pub async fn prepare_shutdown(&self) -> BiliResult<()> {
+        self.call(|reply| ManagerCommand::PrepareShutdown { reply })
+            .await
+    }
+
+    /// 最终 shutdown：停止 worker 并退出监督任务；仅在退出准备成功或用户明确放弃后调用。
+    pub async fn finalize_shutdown(&self) -> BiliResult<()> {
+        self.call(|reply| ManagerCommand::Shutdown { reply }).await?;
         let sup = self.supervisor.clone();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !sup.is_finished() {
@@ -289,6 +307,14 @@ impl TaskManager {
         .await
         .ok();
         Ok(())
+    }
+
+    /// 便捷退出：先准备（保存），再最终退出；保存失败仍会退出并返回错误。
+    pub async fn shutdown(&self) -> BiliResult<()> {
+        let prepared = self.prepare_shutdown().await;
+        let finalized = self.finalize_shutdown().await;
+        prepared?;
+        finalized
     }
 }
 
@@ -347,6 +373,13 @@ enum ManagerCommand {
         client: Arc<BiliClient>,
         reply: oneshot::Sender<BiliResult<()>>,
     },
+    RetryPersistence {
+        reply: oneshot::Sender<BiliResult<()>>,
+    },
+    /// 退出准备：暂停并把最终状态落盘（可重试）；失败时不退出（design D8/3.9）。
+    PrepareShutdown {
+        reply: oneshot::Sender<BiliResult<()>>,
+    },
     Shutdown {
         reply: oneshot::Sender<BiliResult<()>>,
     },
@@ -381,6 +414,12 @@ struct Inner {
     /// 清理失败、待重试的任务临时目录及已尝试次数。
     pending_cleanups: Vec<(Vec<PathBuf>, u32)>,
     last_cleanup_retry: Instant,
+    /// 完成收尾写库失败、待重试的「任务记录 + 历史」事务（design D8）。
+    pending_completion: HashMap<TaskId, HistoryRecord>,
+    /// 失败/取消历史写入失败、待重试的记录（design D8）。
+    pending_history: HashMap<TaskId, HistoryRecord>,
+    /// 进度落盘失败后的有界退避间隔（design D8）。
+    flush_backoff: Duration,
     sem: Arc<Semaphore>,
     reduction_permits: Vec<OwnedSemaphorePermit>,
     dirty: HashSet<TaskId>,
@@ -393,6 +432,7 @@ struct Inner {
     event_tx: broadcast::Sender<TaskEvent>,
     worker_tx: mpsc::UnboundedSender<WorkerEvent>,
     artifact_store_fail_once: Option<Arc<AtomicBool>>,
+    enqueue_store_fail_once: Option<Arc<AtomicBool>>,
 }
 
 impl Inner {
@@ -428,7 +468,9 @@ impl Inner {
             }
         }
         self.shutdown_workers().await;
-        self.flush_all().await;
+        if let Err(error) = self.flush_all().await {
+            tracing::warn!(error = %error, "退出时最终落盘失败");
+        }
         if let Some(reply) = pending_shutdown {
             let _ = reply.send(Ok(()));
         }
@@ -571,24 +613,41 @@ impl Inner {
     async fn handle_command(&mut self, cmd: ManagerCommand) -> LoopAction {
         match cmd {
             ManagerCommand::Enqueue { specs, reply } => {
-                let mut ids = Vec::with_capacity(specs.len());
-                let mut views = Vec::with_capacity(specs.len());
-                for spec in specs {
-                    let view = TaskView::new(spec);
-                    ids.push(view.id.clone());
-                    self.order.push(view.id.clone());
-                    views.push(view);
+                // design D8/3.4：同一请求的记录在一个事务中写入；成功后才发布、调度，
+                // 任一写入失败则整体回滚，不留下部分任务、不启动 worker、不返回成功数量。
+                let views: Vec<TaskView> = specs.into_iter().map(TaskView::new).collect();
+                let ids: Vec<TaskId> = views.iter().map(|view| view.id.clone()).collect();
+                let base = self.order.len();
+                let records: Vec<TaskRecord> = views
+                    .iter()
+                    .enumerate()
+                    .map(|(index, view)| task_record(view, (base + index) as i64))
+                    .collect();
+                let injected_failure = self
+                    .enqueue_store_fail_once
+                    .as_ref()
+                    .is_some_and(|fail| fail.swap(false, Ordering::SeqCst));
+                let result = if injected_failure {
+                    Err(BiliError::Disk("测试注入：批量入队写库失败".into()))
+                } else {
+                    let db = Arc::clone(self.storage.db());
+                    spawn_blocking_db(move || db.insert_tasks(&records)).await
+                };
+                match result {
+                    Ok(()) => {
+                        for view in views {
+                            self.order.push(view.id.clone());
+                            self.tasks.insert(view.id.clone(), view.clone());
+                            self.emit(TaskEvent::Created { view });
+                        }
+                        self.publish();
+                        self.schedule();
+                        let _ = reply.send(Ok(ids));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
                 }
-                for view in views {
-                    let record_idx =
-                        self.order.iter().position(|id| id == &view.id).unwrap_or(0) as i64;
-                    self.tasks.insert(view.id.clone(), view.clone());
-                    self.persist_record(task_record(&view, record_idx)).await;
-                    self.emit(TaskEvent::Created { view });
-                }
-                self.publish();
-                self.schedule();
-                let _ = reply.send(Ok(ids));
             }
             ManagerCommand::Pause { id, reply } => {
                 let result = self.pause_task(&id).await;
@@ -669,8 +728,8 @@ impl Inner {
                 let _ = reply.send(Ok(n));
             }
             ManagerCommand::Flush { reply } => {
-                self.flush_all().await;
-                let _ = reply.send(Ok(()));
+                let result = self.flush_all().await;
+                let _ = reply.send(result);
             }
             ManagerCommand::SetSettings { settings, reply } => {
                 let result = self.apply_settings(settings);
@@ -680,12 +739,15 @@ impl Inner {
                 self.client = client;
                 let _ = reply.send(Ok(()));
             }
-            ManagerCommand::Shutdown { reply } => {
-                // 先应答前把进行中任务标记暂停并落盘，避免壳退出后丢状态
-                for (id, control) in self.controls.iter() {
+            ManagerCommand::RetryPersistence { reply } => {
+                let result = self.retry_persistence().await;
+                let _ = reply.send(result);
+            }
+            ManagerCommand::PrepareShutdown { reply } => {
+                // 暂停进行中任务并把最终状态落盘；失败时保留可重试状态、不退出（design D8/3.9）。
+                for control in self.controls.values() {
                     control.pause.store(true, Ordering::Relaxed);
                     control.cancel.cancel();
-                    let _ = id;
                 }
                 for view in self.tasks.values_mut() {
                     if view.phase.is_active() {
@@ -694,6 +756,14 @@ impl Inner {
                         view.restored = true;
                         view.touch();
                     }
+                }
+                let result = self.flush_all().await;
+                let _ = reply.send(result);
+            }
+            ManagerCommand::Shutdown { reply } => {
+                for control in self.controls.values() {
+                    control.pause.store(true, Ordering::Relaxed);
+                    control.cancel.cancel();
                 }
                 return LoopAction::Shutdown(reply);
             }
@@ -799,7 +869,7 @@ impl Inner {
         self.auto_retried.remove(id);
         self.controls.remove(id);
         self.cleanup_temp(id).await;
-        self.persist_view(id).await;
+        let _ = self.persist_view(id).await;
         self.emit(TaskEvent::Updated {
             view: self.tasks[id].clone(),
         });
@@ -897,7 +967,7 @@ impl Inner {
                     let view = view.clone();
                     self.emit(TaskEvent::Updated { view });
                     self.dirty.insert(id.clone());
-                    self.persist_view(&id).await;
+                    let _ = self.persist_view(&id).await;
                     self.mark_snapshot_dirty();
                 }
             }
@@ -983,8 +1053,8 @@ impl Inner {
                         view.touch();
                     }
                     self.cleanup_temp(&id).await;
-                    self.persist_view(&id).await;
-                    self.write_history(&id, "cancelled").await;
+                    let _ = self.persist_view(&id).await;
+                    let _ = self.write_history(&id, "cancelled").await;
                     self.emit(TaskEvent::Cancelled { id: id.clone() });
                 }
                 self.schedule();
@@ -1025,9 +1095,7 @@ impl Inner {
                 }
                 self.dirty.remove(id);
                 self.auto_retried.remove(id);
-                self.cleanup_temp(id).await;
-                self.persist_view(id).await;
-                self.write_history(id, "done").await;
+                self.complete_task(id).await;
                 let view = self.tasks[id].clone();
                 self.emit(TaskEvent::Done { view });
             }
@@ -1040,7 +1108,7 @@ impl Inner {
                     view.touch();
                 }
                 // 暂停保留临时文件供续传
-                self.persist_view(id).await;
+                let _ = self.persist_view(id).await;
                 self.emit(TaskEvent::Paused { id: id.to_string() });
             }
             Err(e) if e.is_cancelled() || cancelled_by_user => {
@@ -1052,8 +1120,8 @@ impl Inner {
                     view.touch();
                 }
                 self.cleanup_temp(id).await;
-                self.persist_view(id).await;
-                self.write_history(id, "cancelled").await;
+                let _ = self.persist_view(id).await;
+                let _ = self.write_history(id, "cancelled").await;
                 self.emit(TaskEvent::Cancelled { id: id.to_string() });
             }
             Err(e) if is_transient_disk(&e) && !self.auto_retried.contains(id) => {
@@ -1076,7 +1144,7 @@ impl Inner {
                     view.restored = false;
                     view.touch();
                 }
-                self.persist_view(id).await;
+                let _ = self.persist_view(id).await;
                 self.emit(TaskEvent::Updated {
                     view: self.tasks[id].clone(),
                 });
@@ -1098,8 +1166,8 @@ impl Inner {
                     "任务失败（保留临时文件供重试续传）"
                 );
                 // 失败保留临时文件，重试时可续传
-                self.persist_view(id).await;
-                self.write_history(id, "failed").await;
+                let _ = self.persist_view(id).await;
+                let _ = self.write_history(id, "failed").await;
                 let view = self.tasks[id].clone();
                 self.emit(TaskEvent::Failed { view, error: e });
             }
@@ -1108,8 +1176,8 @@ impl Inner {
 
     async fn finish_cancelled(&mut self, id: &str) {
         self.cleanup_temp(id).await;
-        self.persist_view(id).await;
-        self.write_history(id, "cancelled").await;
+        let _ = self.persist_view(id).await;
+        let _ = self.write_history(id, "cancelled").await;
         self.emit(TaskEvent::Cancelled { id: id.to_string() });
         self.publish();
     }
@@ -1123,7 +1191,7 @@ impl Inner {
             }
             view.touch();
         }
-        self.persist_view(id).await;
+        self.persist_view(id).await?;
         let view = self.tasks[id].clone();
         self.emit(TaskEvent::PhaseChanged {
             id: id.to_string(),
@@ -1153,7 +1221,7 @@ impl Inner {
             phase,
             view,
         });
-        self.persist_view(id).await;
+        let _ = self.persist_view(id).await;
     }
 
     // ---- 持久化 ----
@@ -1185,18 +1253,43 @@ impl Inner {
         Ok(())
     }
 
-    async fn persist_view(&mut self, id: &str) {
-        let Some(view) = self.tasks.get(id).cloned() else {
-            return;
-        };
-        let idx = self.order.iter().position(|x| x == id).unwrap_or(0) as i64;
-        self.persist_record(task_record(&view, idx)).await;
+    fn record_index(&self, id: &str) -> i64 {
+        self.order.iter().position(|x| x == id).unwrap_or(0) as i64
     }
 
-    async fn persist_record(&self, record: TaskRecord) {
+    fn mark_persist_error(&mut self, id: &str, error: &BiliError) {
+        if let Some(view) = self.tasks.get_mut(id) {
+            view.persist_error = Some(format!("任务记录保存失败：{}", error.describe()));
+            view.touch();
+        }
+        self.dirty.insert(id.to_string());
+        self.mark_snapshot_dirty();
+    }
+
+    fn clear_persist_error(&mut self, id: &str) {
+        if let Some(view) = self.tasks.get_mut(id) {
+            view.persist_error = None;
+        }
+    }
+
+    /// 关键状态落盘：失败时保留内存状态与待保存标记，并把错误返回给调用方（design D8）。
+    async fn persist_view(&mut self, id: &str) -> BiliResult<()> {
+        let Some(view) = self.tasks.get(id).cloned() else {
+            return Ok(());
+        };
+        let record = task_record(&view, self.record_index(id));
         let db = Arc::clone(self.storage.db());
-        if let Err(e) = spawn_blocking_db(move || db.upsert_task(&record)).await {
-            tracing::warn!(error = %e, "persist task failed");
+        match spawn_blocking_db(move || db.upsert_task(&record)).await {
+            Ok(()) => {
+                self.dirty.remove(id);
+                self.clear_persist_error(id);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(task = %id, error = %error, "persist task failed");
+                self.mark_persist_error(id, &error);
+                Err(error)
+            }
         }
     }
 
@@ -1209,60 +1302,171 @@ impl Inner {
         if self.dirty.is_empty() {
             return;
         }
-        if self.last_progress_flush.elapsed() < PROGRESS_FLUSH_INTERVAL {
+        if self.last_progress_flush.elapsed() < self.flush_backoff {
             return;
         }
-        self.flush_dirty().await;
+        if let Err(error) = self.flush_dirty().await {
+            tracing::warn!(error = %error, "flush progress failed");
+        }
     }
 
-    async fn flush_dirty(&mut self) {
-        let ids: Vec<TaskId> = self.dirty.drain().collect();
+    /// 批量落盘脏任务；仅成功保存后清除 dirty，失败保留并做有界退避（design D8/3.6）。
+    async fn flush_dirty(&mut self) -> BiliResult<()> {
+        self.dirty.retain(|id| self.tasks.contains_key(id));
+        if self.dirty.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<TaskId> = self.dirty.iter().cloned().collect();
         let mut records = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(view) = self.tasks.get(id) {
-                let idx = self.order.iter().position(|x| x == id).unwrap_or(0) as i64;
-                records.push(task_record(view, idx));
+                records.push(task_record(view, self.record_index(id)));
             }
-        }
-        if records.is_empty() {
-            return;
         }
         let db = Arc::clone(self.storage.db());
-        if let Err(e) = spawn_blocking_db(move || {
-            for r in &records {
-                db.upsert_task(r)?;
+        match spawn_blocking_db(move || db.insert_tasks(&records)).await {
+            Ok(()) => {
+                for id in &ids {
+                    self.dirty.remove(id);
+                    self.clear_persist_error(id);
+                }
+                self.flush_backoff = PROGRESS_FLUSH_INTERVAL;
+                self.last_progress_flush = Instant::now();
+                Ok(())
             }
-            Ok(())
-        })
-        .await
-        {
-            tracing::warn!(error = %e, "flush progress failed");
+            Err(error) => {
+                self.flush_backoff = (self.flush_backoff * 2).min(Duration::from_secs(30));
+                self.last_progress_flush = Instant::now();
+                for id in &ids {
+                    self.mark_persist_error(id, &error);
+                }
+                Err(error)
+            }
         }
-        self.last_progress_flush = Instant::now();
     }
 
-    async fn flush_all(&mut self) {
+    async fn flush_all(&mut self) -> BiliResult<()> {
         self.dirty = self.tasks.keys().cloned().collect();
-        self.flush_dirty().await;
+        self.flush_dirty().await
     }
 
-    async fn write_history(&self, id: &str, status: &str) {
-        let Some(view) = self.tasks.get(id) else {
+    /// 完成任务：最终视图 + 历史 + 裁剪在同一事务提交；失败时保留可重试状态（design D8/3.7）。
+    async fn complete_task(&mut self, id: &str) {
+        self.auto_retried.remove(id);
+        self.cleanup_temp(id).await;
+        let Some(view) = self.tasks.get(id).cloned() else {
             return;
+        };
+        let history = history_record(&view, "done");
+        let record = task_record(&view, self.record_index(id));
+        let db = Arc::clone(self.storage.db());
+        let keep = self.settings.history_limit;
+        let history_for_retry = history.clone();
+        match spawn_blocking_db(move || db.finish_task(&record, &history, keep)).await {
+            Ok(()) => {
+                self.dirty.remove(id);
+                self.clear_persist_error(id);
+                self.pending_completion.remove(id);
+                self.emit(TaskEvent::HistoryChanged);
+            }
+            Err(error) => {
+                tracing::warn!(task = %id, error = %error, "完成任务事务写入失败，保留重试状态");
+                self.pending_completion
+                    .insert(id.to_string(), history_for_retry);
+                self.mark_persist_error(id, &error);
+            }
+        }
+    }
+
+    /// 写入失败/取消历史；失败时保留待重试记录（design D8）。
+    async fn write_history(&mut self, id: &str, status: &str) -> BiliResult<()> {
+        let Some(view) = self.tasks.get(id) else {
+            return Ok(());
         };
         let record = history_record(view, status);
         let db = Arc::clone(self.storage.db());
         let limit = self.settings.history_limit;
-        if let Err(e) = spawn_blocking_db(move || {
+        let record_for_retry = record.clone();
+        match spawn_blocking_db(move || {
             db.insert_history(&record)?;
             db.prune_history(limit)?;
             Ok(())
         })
         .await
         {
-            tracing::warn!(error = %e, "write history failed");
+            Ok(()) => {
+                self.pending_history.remove(id);
+                self.emit(TaskEvent::HistoryChanged);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::warn!(task = %id, error = %error, "write history failed");
+                self.pending_history
+                    .insert(id.to_string(), record_for_retry);
+                self.mark_persist_error(id, &error);
+                Err(error)
+            }
         }
-        self.emit(TaskEvent::HistoryChanged);
+    }
+
+    /// 重试所有待保存动作：完成事务、历史写入与脏任务记录（design D8/3.8）。
+    async fn retry_persistence(&mut self) -> BiliResult<()> {
+        let mut first_error: Option<BiliError> = None;
+        // 1) 完成事务（任务视图 + 历史 + 裁剪原子提交）
+        let completions: Vec<(TaskId, HistoryRecord)> =
+            self.pending_completion.drain().collect();
+        for (id, history) in completions {
+            let Some(view) = self.tasks.get(&id).cloned() else {
+                continue;
+            };
+            let record = task_record(&view, self.record_index(&id));
+            let db = Arc::clone(self.storage.db());
+            let keep = self.settings.history_limit;
+            let history_for_retry = history.clone();
+            match spawn_blocking_db(move || db.finish_task(&record, &history, keep)).await {
+                Ok(()) => {
+                    self.dirty.remove(&id);
+                    self.clear_persist_error(&id);
+                    self.emit(TaskEvent::HistoryChanged);
+                }
+                Err(error) => {
+                    self.pending_completion.insert(id.clone(), history_for_retry);
+                    self.mark_persist_error(&id, &error);
+                    tracing::warn!(task = %id, error = %error, "重试完成事务仍失败");
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        // 2) 失败/取消历史
+        let histories: Vec<(TaskId, HistoryRecord)> = self.pending_history.drain().collect();
+        for (id, history) in histories {
+            let db = Arc::clone(self.storage.db());
+            let keep = self.settings.history_limit;
+            let history_for_retry = history.clone();
+            match spawn_blocking_db(move || {
+                db.insert_history(&history)?;
+                db.prune_history(keep)?;
+                Ok(())
+            })
+            .await
+            {
+                Ok(()) => self.emit(TaskEvent::HistoryChanged),
+                Err(error) => {
+                    self.pending_history.insert(id.clone(), history_for_retry);
+                    self.mark_persist_error(&id, &error);
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        // 3) 脏任务记录
+        if let Err(error) = self.flush_dirty().await {
+            first_error.get_or_insert(error);
+        }
+        self.publish();
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// 取出任务启动时确认的临时目录；没有记录时按当前视图推算（旧数据/恢复任务）。
@@ -1490,6 +1694,7 @@ fn task_record(view: &TaskView, sort_index: i64) -> TaskRecord {
         progress: serde_json::to_string(&view.progress).unwrap_or_else(|_| "{}".into()),
         output_path: view.output_path.clone(),
         artifacts: serde_json::to_string(&view.artifacts).unwrap_or_else(|_| "[]".into()),
+        metadata: serde_json::to_string(&view.metadata()).unwrap_or_else(|_| "{}".into()),
         error: view
             .error
             .as_ref()
@@ -1538,6 +1743,20 @@ fn view_from_record(rec: &TaskRecord) -> Option<TaskView> {
             None,
         ));
         view.artifacts_legacy = true;
+    }
+    // D7：元信息独立解析；损坏或未知版本只丢失元信息，不丢弃任务本体或伪造值。
+    match serde_json::from_str::<TaskMetadata>(&rec.metadata) {
+        Ok(metadata) if metadata.version <= TASK_METADATA_VERSION => view.apply_metadata(metadata),
+        Ok(metadata) => tracing::warn!(
+            task = %rec.id,
+            version = metadata.version,
+            "未知任务元信息版本，保留基础记录"
+        ),
+        Err(error) => tracing::warn!(
+            task = %rec.id,
+            %error,
+            "任务元信息损坏，按未知值恢复"
+        ),
     }
     view.error = error;
     view.restored = rec.restored;
@@ -1718,19 +1937,29 @@ mod tests {
 
     struct Harness {
         _dir: tempfile::TempDir,
+        settings: Settings,
         storage: Arc<Storage>,
         manager: TaskManager,
         max_active: Arc<AtomicUsize>,
     }
 
     async fn harness(settings: Settings, behavior: MockBehavior) -> Harness {
-        harness_with_artifact_failure(settings, behavior, None).await
+        harness_full(settings, behavior, None, None).await
     }
 
     async fn harness_with_artifact_failure(
+        settings: Settings,
+        behavior: MockBehavior,
+        artifact_store_fail_once: Option<Arc<AtomicBool>>,
+    ) -> Harness {
+        harness_full(settings, behavior, artifact_store_fail_once, None).await
+    }
+
+    async fn harness_full(
         mut settings: Settings,
         behavior: MockBehavior,
         artifact_store_fail_once: Option<Arc<AtomicBool>>,
+        enqueue_store_fail_once: Option<Arc<AtomicBool>>,
     ) -> Harness {
         let dir = tempfile::tempdir().unwrap();
         settings.download_dir = Some(dir.path().join("downloads").to_string_lossy().into_owned());
@@ -1744,6 +1973,7 @@ mod tests {
             max_active: Arc::new(AtomicUsize::new(0)),
         });
         let max_active = Arc::clone(&mock.max_active);
+        let settings_for_harness = settings.clone();
         let config = TaskManagerConfig {
             client,
             storage: Arc::clone(&storage),
@@ -1752,10 +1982,12 @@ mod tests {
             runner: Some(mock),
             download_http: Some(reqwest::Client::new()),
             artifact_store_fail_once,
+            enqueue_store_fail_once,
         };
         let manager = TaskManager::start(config).await.unwrap();
         Harness {
             _dir: dir,
+            settings: settings_for_harness.clone(),
             storage,
             manager,
             max_active,
@@ -2087,6 +2319,7 @@ mod tests {
             })),
             download_http: Some(reqwest::Client::new()),
             artifact_store_fail_once: None,
+            enqueue_store_fail_once: None,
         })
         .await
         .unwrap();
@@ -2144,6 +2377,7 @@ mod tests {
             })),
             download_http: Some(reqwest::Client::new()),
             artifact_store_fail_once: None,
+            enqueue_store_fail_once: None,
         })
         .await
         .unwrap();
@@ -2525,6 +2759,271 @@ mod tests {
         );
         assert_eq!(h.max_active.load(Ordering::SeqCst), 3);
         h.manager.shutdown().await.unwrap();
+    }
+
+    fn restart_with(h: &Harness, behavior: MockBehavior) -> std::pin::Pin<Box<dyn std::future::Future<Output = TaskManager> + '_>> {
+        let storage = Arc::clone(&h.storage);
+        let settings = h.settings.clone();
+        let runner = Arc::new(MockRunner {
+            behavior: Arc::new(behavior),
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+        });
+        Box::pin(async move {
+            TaskManager::start(TaskManagerConfig {
+                client: Arc::new(BiliClient::new(None, Default::default()).unwrap()),
+                storage,
+                settings,
+                ffmpeg: None,
+                runner: Some(runner),
+                download_http: Some(reqwest::Client::new()),
+                artifact_store_fail_once: None,
+                enqueue_store_fail_once: None,
+            })
+            .await
+            .unwrap()
+        })
+    }
+
+    #[tokio::test]
+    async fn task_metadata_survives_restart_for_done_and_paused() {
+        // 完成任务的作者/条目/选择重启后保留（D7/R8 回归）。
+        let h = harness(Settings::default(), behavior_default()).await;
+        h.manager.enqueue(vec![spec("BV1")]).await.unwrap();
+        let snap = wait_for(&h.manager, |s| {
+            s.tasks.iter().all(|t| t.phase == TaskPhase::Done)
+        })
+        .await;
+        assert_eq!(snap.tasks[0].upper, "up");
+        h.manager.shutdown().await.unwrap();
+        let manager = restart_with(&h, behavior_default()).await;
+        let restored = manager.snapshot();
+        assert_eq!(restored.tasks.len(), 1);
+        assert_eq!(restored.tasks[0].phase, TaskPhase::Done);
+        assert_eq!(restored.tasks[0].upper, "up", "作者必须从元信息恢复");
+        assert_eq!(restored.tasks[0].entries, vec!["正片".to_string()]);
+        assert_eq!(restored.tasks[0].selected_entries, vec![0]);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_metadata_survives_restart_for_paused() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(Settings::default(), behavior).await;
+        let id = h.manager.enqueue(vec![spec("BV2")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == id && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        h.manager.pause(&id).await.unwrap();
+        wait_for(&h.manager, |s| {
+            s.tasks.iter().any(|t| t.id == id && t.phase == TaskPhase::Paused)
+        })
+        .await;
+        h.manager.shutdown().await.unwrap();
+        let manager = restart_with(&h, behavior_default()).await;
+        let restored = manager.snapshot();
+        assert_eq!(restored.tasks[0].phase, TaskPhase::Paused);
+        assert_eq!(restored.tasks[0].upper, "up");
+        assert!(restored.tasks[0].progress.downloaded > 0, "暂停进度应保留");
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupt_or_unknown_metadata_keeps_task_without_fabricating() {
+        for metadata in ["{not json", r#"{"version":99,"upper":"未来作者"}"#] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = AppPaths::new(dir.path().join("data"));
+            let storage = Arc::new(Storage::open_with_legacy(paths, None).unwrap());
+            let mut view = TaskView::new(spec("BVcorrupt"));
+            view.phase = TaskPhase::Done;
+            view.title = "可恢复任务".into();
+            let mut record = task_record(&view, 0);
+            record.metadata = metadata.into();
+            storage.db().upsert_task(&record).unwrap();
+            let manager = TaskManager::start(TaskManagerConfig {
+                client: Arc::new(BiliClient::new(None, Default::default()).unwrap()),
+                storage,
+                settings: Settings::default(),
+                ffmpeg: None,
+                runner: Some(Arc::new(MockRunner {
+                    behavior: Arc::new(behavior_default()),
+                    active: Arc::new(AtomicUsize::new(0)),
+                    max_active: Arc::new(AtomicUsize::new(0)),
+                })),
+                download_http: Some(reqwest::Client::new()),
+                artifact_store_fail_once: None,
+                enqueue_store_fail_once: None,
+            })
+            .await
+            .unwrap();
+            let snap = manager.snapshot();
+            assert_eq!(snap.tasks.len(), 1, "元信息损坏/未知不得丢弃任务：{metadata}");
+            assert_eq!(snap.tasks[0].title, "可恢复任务");
+            assert!(snap.tasks[0].upper.is_empty(), "不得伪造作者：{metadata}");
+            manager.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_persistence_failure_leaves_no_partial_tasks_or_workers() {
+        let fail = Arc::new(AtomicBool::new(true));
+        let h = harness_full(
+            Settings::default(),
+            behavior_default(),
+            None,
+            Some(Arc::clone(&fail)),
+        )
+        .await;
+        let result = h
+            .manager
+            .enqueue(vec![spec("BV1"), spec("BV2")])
+            .await;
+        assert!(result.is_err(), "写库失败必须返回错误");
+        assert!(h.manager.snapshot().tasks.is_empty(), "不得发布部分任务");
+        assert_eq!(h.storage.db().load_tasks().unwrap().len(), 0);
+        assert_eq!(h.storage.db().history_count().unwrap(), 0);
+        // 注入只生效一次次；恢复后可正常入队。
+        let ids = h.manager.enqueue(vec![spec("BV3")]).await.unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(h.manager.snapshot().tasks.len(), 1);
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn progress_flush_failure_is_visible_and_retryable() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(Settings::default(), behavior).await;
+        let id = h.manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == id && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        h.storage.db().fail_bulk_insert_at(0);
+        let error = h.manager.flush().await.unwrap_err();
+        assert!(matches!(error, BiliError::Disk(_)));
+        wait_until(
+            || {
+                h.manager
+                    .snapshot()
+                    .tasks
+                    .iter()
+                    .any(|t| t.id == id && t.persist_error.is_some())
+            },
+            "进度保存失败可见",
+        )
+        .await;
+        let snap = h.manager.snapshot();
+        let task = snap.tasks.iter().find(|t| t.id == id).unwrap();
+        assert!(
+            task.persist_error.as_deref().is_some_and(|e| e.contains("保存失败")),
+            "进度保存失败必须可见：{:?}",
+            task.persist_error
+        );
+        // 重试只写记录：成功后清除错误并保存最新进度，不重新下载。
+        h.manager.retry_persistence().await.unwrap();
+        wait_until(
+            || {
+                h.manager
+                    .snapshot()
+                    .tasks
+                    .iter()
+                    .any(|t| t.id == id && t.persist_error.is_none())
+            },
+            "重试后清除持久化错误",
+        )
+        .await;
+        let stored = h
+            .storage
+            .db()
+            .load_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
+        let stored_progress: crate::api::types::Progress =
+            serde_json::from_str(&stored.progress).unwrap();
+        assert!(stored_progress.downloaded > 0);
+        h.manager.cancel(&id).await.unwrap();
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completion_transaction_failure_is_visible_and_retryable() {
+        let h = harness(Settings::default(), behavior_default()).await;
+        h.storage.db().fail_next_history_once();
+        h.manager.enqueue(vec![spec("BV1")]).await.unwrap();
+        h.manager.flush().await.ok();
+        let snap = wait_for(&h.manager, |s| {
+            s.tasks.iter().all(|t| t.phase == TaskPhase::Done)
+        })
+        .await;
+        assert!(
+            snap.tasks[0].persist_error.as_deref().is_some_and(|e| e.contains("保存失败")),
+            "完成事务失败必须可见"
+        );
+        assert_eq!(h.storage.db().history_count().unwrap(), 0, "失败时历史不得半写");
+        h.manager.retry_persistence().await.unwrap();
+        assert_eq!(h.storage.db().history_count().unwrap(), 1);
+        wait_until(
+            || h.manager.snapshot().tasks.iter().all(|t| t.persist_error.is_none()),
+            "完成事务重试后清除错误",
+        )
+        .await;
+        // 再次重试不得重复写历史。
+        h.manager.retry_persistence().await.unwrap();
+        assert_eq!(h.storage.db().history_count().unwrap(), 1);
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_task_history_failure_is_retryable_without_duplicates() {
+        let mut behavior = behavior_default();
+        behavior.fail_times = AtomicUsize::new(1);
+        let h = harness(Settings::default(), behavior).await;
+        h.storage.db().fail_next_history_once();
+        h.manager.enqueue(vec![spec("BV1")]).await.unwrap();
+        wait_for(&h.manager, |s| {
+            s.tasks.iter().all(|t| t.phase == TaskPhase::Failed)
+        })
+        .await;
+        wait_until(
+            || h.manager.snapshot().tasks.iter().any(|t| t.persist_error.is_some()),
+            "失败历史写入错误可见",
+        )
+        .await;
+        h.manager.retry_persistence().await.unwrap();
+        assert_eq!(h.storage.db().history_count().unwrap(), 1);
+        h.manager.retry_persistence().await.unwrap();
+        assert_eq!(h.storage.db().history_count().unwrap(), 1);
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepare_shutdown_failure_keeps_retry_capability() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(Settings::default(), behavior).await;
+        let id = h.manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == id && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        h.storage.db().fail_bulk_insert_at(0);
+        assert!(h.manager.prepare_shutdown().await.is_err(), "保存失败必须返回错误");
+        assert_eq!(h.manager.snapshot().tasks.len(), 1, "失败时不得丢弃状态");
+        // 重试成功后可以正常准备并最终退出。
+        h.manager.retry_persistence().await.unwrap();
+        h.manager.prepare_shutdown().await.unwrap();
+        h.manager.finalize_shutdown().await.unwrap();
     }
 
     trait NoSpeed {
