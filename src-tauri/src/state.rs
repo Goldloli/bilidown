@@ -29,6 +29,9 @@ use crate::{dock, dto, events, menu};
 #[derive(Default)]
 pub struct FileStatusCache {
     entries: Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(bool, u64)>)>>,
+    /// 统计：真实 metadata 探测次数（测试性能验收用，design D10/7.3）。
+    misses: AtomicU64,
+    hits: AtomicU64,
 }
 
 const FILE_STATUS_TTL: Duration = Duration::from_secs(5);
@@ -37,15 +40,28 @@ impl FileStatusCache {
     /// 仅返回仍在 TTL 内的缓存值。
     pub fn lookup(&self, path: &str) -> Option<Option<(bool, u64)>> {
         let entries = self.entries.lock().ok()?;
-        entries.get(path).and_then(|(at, value)| {
+        let fresh = entries.get(path).and_then(|(at, value)| {
             (at.elapsed() < FILE_STATUS_TTL).then_some(*value)
-        })
+        });
+        if fresh.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        }
+        fresh
     }
 
     pub fn remember(&self, path: &str, probed: Option<(bool, u64)>) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut entries) = self.entries.lock() {
             entries.insert(path.to_string(), (std::time::Instant::now(), probed));
         }
+    }
+
+    /// 真实 metadata 探测次数与缓存命中次数（测试/诊断用）。
+    pub fn probe_counts(&self) -> (u64, u64) {
+        (
+            self.misses.load(Ordering::Relaxed),
+            self.hits.load(Ordering::Relaxed),
+        )
     }
 
     /// 权威文件操作后失效单条记录（design D9/7.2）。
@@ -919,6 +935,49 @@ mod tests {
         cache.invalidate_all();
         let mut probe = FileProbe::with_cache(Arc::clone(&cache));
         assert!(!probe.exists(&path_str), "失效后不得把已删除文件当作有效");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hot_progress_updates_do_not_reprobe_unchanged_artifacts() {
+        use crate::dto::{FileProbe, artifact_dtos_with};
+        use bilidown_core::DownloadArtifact;
+        use std::collections::HashSet;
+        let dir = unique_dir("file-hot");
+        let cache = Arc::new(FileStatusCache::default());
+        let mut artifacts = Vec::new();
+        for index in 0..1000 {
+            let path = dir.join(format!("done-{index}.mp4"));
+            std::fs::write(&path, b"x").unwrap();
+            artifacts.push(DownloadArtifact::media(
+                path,
+                1,
+                Some(index),
+                Some("P".into()),
+            ));
+        }
+        // 首帧：1000 个产物各探测一次。
+        let mut probe = FileProbe::with_cache(Arc::clone(&cache));
+        let first = artifact_dtos_with(&artifacts, &HashSet::new(), &mut probe);
+        assert_eq!(first.len(), 1000);
+        let (misses_first, _) = cache.probe_counts();
+        assert_eq!(misses_first, 1000);
+        // 热进度更新（未变化产物）：TTL 内全部命中缓存，metadata 检查数为 0。
+        let mut probe = FileProbe::with_cache(Arc::clone(&cache));
+        let second = artifact_dtos_with(&artifacts, &HashSet::new(), &mut probe);
+        assert_eq!(second.len(), 1000);
+        let (misses_second, hits_second) = cache.probe_counts();
+        assert_eq!(
+            misses_second, misses_first,
+            "未变化产物不得重复 metadata 检查"
+        );
+        assert_eq!(hits_second, 1000);
+        // 失效后重新探测（窗口激活/文件操作）。
+        cache.invalidate_all();
+        let mut probe = FileProbe::with_cache(Arc::clone(&cache));
+        let _ = artifact_dtos_with(&artifacts, &HashSet::new(), &mut probe);
+        let (misses_after, _) = cache.probe_counts();
+        assert_eq!(misses_after, 2000, "失效后应重新校验");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

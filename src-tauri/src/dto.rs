@@ -707,7 +707,7 @@ impl FileProbe {
     }
 }
 
-fn artifact_dtos_with(
+pub fn artifact_dtos_with(
     artifacts: &[DownloadArtifact],
     selected: &HashSet<usize>,
     probe: &mut FileProbe,
