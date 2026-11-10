@@ -16,6 +16,14 @@ use crate::api::types::{AudioQuality, Codec, ContentKind, Progress, Quality, Tas
 /// 任务 id（UUID 字符串；所有操作以 id 寻址，避免 v1 下标错位）。
 pub type TaskId = String;
 
+/// 批量清理结果：真实移除数量 + 删除失败、仍保留在队列中的任务 id（design D2）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearOutcome {
+    pub removed: usize,
+    pub failed: Vec<TaskId>,
+}
+
 /// 任务状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

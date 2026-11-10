@@ -97,6 +97,8 @@ fn main() {
         commands::retry_all,
         commands::clear_finished,
         commands::clear_inactive,
+        commands::retry_persistence,
+        commands::force_quit_app,
         // 账户 / 登录
         commands::get_account,
         commands::login_start,
@@ -162,6 +164,8 @@ fn main() {
         commands::retry_all,
         commands::clear_finished,
         commands::clear_inactive,
+        commands::retry_persistence,
+        commands::force_quit_app,
         commands::get_account,
         commands::login_start,
         commands::login_poll,

@@ -90,6 +90,9 @@ pub struct Db {
     /// 测试注入：下一次历史写入失败（验证可见错误与重试）。
     #[cfg(test)]
     history_fail_once: AtomicBool,
+    /// 测试注入：下一次任务删除失败（验证部分失败汇总）。
+    #[cfg(test)]
+    delete_fail_once: AtomicBool,
 }
 
 impl std::fmt::Debug for Db {
@@ -112,6 +115,8 @@ impl Db {
             bulk_insert_fail_at: Mutex::new(None),
             #[cfg(test)]
             history_fail_once: AtomicBool::new(false),
+            #[cfg(test)]
+            delete_fail_once: AtomicBool::new(false),
         };
         db.configure()?;
         db.migrate()?;
@@ -128,6 +133,8 @@ impl Db {
             bulk_insert_fail_at: Mutex::new(None),
             #[cfg(test)]
             history_fail_once: AtomicBool::new(false),
+            #[cfg(test)]
+            delete_fail_once: AtomicBool::new(false),
         };
         db.configure()?;
         db.migrate()?;
@@ -222,6 +229,12 @@ impl Db {
         self.history_fail_once.store(true, Ordering::SeqCst);
     }
 
+    /// 测试注入：下一次任务删除失败。
+    #[cfg(test)]
+    pub(crate) fn fail_next_delete_once(&self) {
+        self.delete_fail_once.store(true, Ordering::SeqCst);
+    }
+
     #[cfg(test)]
     fn take_history_failure(&self) -> bool {
         self.history_fail_once.swap(false, Ordering::SeqCst)
@@ -265,6 +278,10 @@ impl Db {
     }
 
     pub fn delete_task(&self, id: &str) -> BiliResult<()> {
+        #[cfg(test)]
+        if self.delete_fail_once.swap(false, Ordering::SeqCst) {
+            return Err(BiliError::Disk("测试注入：任务删除失败".into()));
+        }
         let conn = self.conn.lock().expect("db lock");
         conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])
             .map_err(db_err)?;

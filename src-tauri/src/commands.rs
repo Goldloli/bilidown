@@ -7,7 +7,7 @@ use bilidown_core::api::types::{BiliId, Content, PlayUrl, TaskSpec};
 use bilidown_core::api::{audio, parse, video};
 use bilidown_core::media::ffmpeg::Ffmpeg;
 use bilidown_core::storage::{HistoryQuery, Settings};
-use bilidown_core::{BiliError, HistoryRecord, QueueSnapshot, TaskPhase};
+use bilidown_core::{BiliError, HistoryRecord, QueueSnapshot};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
@@ -198,16 +198,33 @@ pub async fn open_preferences(app: AppHandle) -> CommandResult<()> {
     Ok(())
 }
 
+/// 主动退出：先保存（可重试），保存失败时返回错误、不退出，由前端提供「重试保存 / 仍然退出」。
 #[tauri::command]
 pub async fn quit_app(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    if let Some(core) = state.try_core() {
+        tracing::info!(target: "shell::app", "退出：保存任务状态");
+        core.manager
+            .prepare_shutdown()
+            .await
+            .map_err(AppErrorDTO::from)?;
+    }
     state.confirm_quit();
     if let Some(core) = state.try_core() {
-        tracing::info!(target: "shell::app", "退出：shutdown TaskManager");
-        if let Err(err) = core.manager.shutdown().await {
-            tracing::warn!(target: "shell::app", error = %err.describe(), "shutdown 失败");
-        }
+        let _ = core.manager.finalize_shutdown().await;
     }
     tracing::info!(target: "shell::app", "用户确认退出");
+    app.exit(0);
+    Ok(())
+}
+
+/// 「仍然退出」：用户明确放弃未保存状态后强制退出，不再要求保存成功。
+#[tauri::command]
+pub async fn force_quit_app(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    state.confirm_quit();
+    if let Some(core) = state.try_core() {
+        let _ = core.manager.finalize_shutdown().await;
+    }
+    tracing::warn!(target: "shell::app", "用户选择放弃未保存状态并退出");
     app.exit(0);
     Ok(())
 }
@@ -399,7 +416,9 @@ pub async fn remove_task(state: State<'_, ShellState>, task_id: String) -> Comma
 }
 
 #[tauri::command]
-pub async fn clear_finished(state: State<'_, ShellState>) -> CommandResult<usize> {
+pub async fn clear_finished(
+    state: State<'_, ShellState>,
+) -> CommandResult<bilidown_core::task::ClearOutcome> {
     core_of(&state)
         .await?
         .manager
@@ -408,22 +427,28 @@ pub async fn clear_finished(state: State<'_, ShellState>) -> CommandResult<usize
         .map_err(AppErrorDTO::from)
 }
 
-/// 清空「未激活」任务（core 无该命令）：排队/暂停/取消逐个 remove。
+/// 清空「未激活」任务：actor 内单批确定目标并统一补调度（design D2/3.5）。
 #[tauri::command]
-pub async fn clear_inactive(state: State<'_, ShellState>) -> CommandResult<usize> {
-    let core = core_of(&state).await?;
-    let snapshot = snapshot_of(&core);
-    let mut removed = 0usize;
-    for task in snapshot.tasks {
-        if matches!(
-            task.phase,
-            TaskPhase::Queued | TaskPhase::Paused | TaskPhase::Cancelled
-        ) && core.manager.remove(&task.id).await.is_ok()
-        {
-            removed += 1;
-        }
-    }
-    Ok(removed)
+pub async fn clear_inactive(
+    state: State<'_, ShellState>,
+) -> CommandResult<bilidown_core::task::ClearOutcome> {
+    core_of(&state)
+        .await?
+        .manager
+        .clear_inactive()
+        .await
+        .map_err(AppErrorDTO::from)
+}
+
+/// 重试所有待保存动作（完成事务/历史/任务记录），返回可读错误（design D8/3.8）。
+#[tauri::command]
+pub async fn retry_persistence(state: State<'_, ShellState>) -> CommandResult<()> {
+    core_of(&state)
+        .await?
+        .manager
+        .retry_persistence()
+        .await
+        .map_err(AppErrorDTO::from)
 }
 
 #[tauri::command]

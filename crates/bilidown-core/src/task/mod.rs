@@ -16,6 +16,7 @@ pub use event::TaskEvent;
 pub use manager::{MAX_CONCURRENT, TaskManager, TaskManagerConfig};
 pub use pipeline::{DownloadPipeline, TaskReporter, TaskRunCtx, TaskRunner};
 pub use state::{
-    ActualParams, ArtifactKind, DownloadArtifact, QueueSnapshot, TaskExtras, TaskId, TaskMeta,
-    TaskOutcome, TaskPhase, TaskResume, TaskView, artifact_file_valid, completed_entry_indices,
+    ActualParams, ArtifactKind, ClearOutcome, DownloadArtifact, QueueSnapshot, TaskExtras, TaskId,
+    TaskMeta, TaskOutcome, TaskPhase, TaskResume, TaskView, artifact_file_valid,
+    completed_entry_indices,
 };

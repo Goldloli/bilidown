@@ -23,8 +23,9 @@ use crate::storage::{Db, HistoryRecord, Settings, Storage, TaskRecord};
 use super::event::TaskEvent;
 use super::pipeline::{DownloadPipeline, TaskReporter, TaskRunCtx, TaskRunner};
 use super::state::{
-    DownloadArtifact, QueueSnapshot, TaskId, TaskMeta, TaskMetadata, TaskOutcome, TaskPhase,
-    TaskResume, TaskView, TASK_METADATA_VERSION, WorkerEvent, completed_entry_indices, now_ms,
+    ClearOutcome, DownloadArtifact, QueueSnapshot, TaskId, TaskMeta, TaskMetadata, TaskOutcome,
+    TaskPhase, TaskResume, TaskView, TASK_METADATA_VERSION, WorkerEvent, completed_entry_indices,
+    now_ms,
 };
 
 /// 并发上限（设置允许 1–8）。
@@ -247,9 +248,15 @@ impl TaskManager {
             .await
     }
 
-    /// 清空已完成/失败/取消的任务（历史保留），返回移除数量。
-    pub async fn clear_finished(&self) -> BiliResult<usize> {
+    /// 清空已完成/失败/取消的任务（历史保留），返回移除数量与失败 id。
+    pub async fn clear_finished(&self) -> BiliResult<ClearOutcome> {
         self.call(|reply| ManagerCommand::ClearFinished { reply })
+            .await
+    }
+
+    /// 清空「未激活」任务（排队/暂停/已取消），保留运行/完成/失败与历史（design D2）。
+    pub async fn clear_inactive(&self) -> BiliResult<ClearOutcome> {
+        self.call(|reply| ManagerCommand::ClearInactive { reply })
             .await
     }
 
@@ -351,7 +358,11 @@ enum ManagerCommand {
         reply: oneshot::Sender<BiliResult<()>>,
     },
     ClearFinished {
-        reply: oneshot::Sender<BiliResult<usize>>,
+        reply: oneshot::Sender<BiliResult<ClearOutcome>>,
+    },
+    /// 清空未激活（排队/暂停/已取消）任务；actor 内单批确定目标并统一补调度（design D2）。
+    ClearInactive {
+        reply: oneshot::Sender<BiliResult<ClearOutcome>>,
     },
     PauseAll {
         reply: oneshot::Sender<BiliResult<usize>>,
@@ -677,8 +688,12 @@ impl Inner {
                 let _ = reply.send(self.remove_task(&id).await);
             }
             ManagerCommand::ClearFinished { reply } => {
-                let n = self.clear_finished().await;
-                let _ = reply.send(Ok(n));
+                let outcome = self.clear_finished().await;
+                let _ = reply.send(Ok(outcome));
+            }
+            ManagerCommand::ClearInactive { reply } => {
+                let outcome = self.clear_inactive().await;
+                let _ = reply.send(Ok(outcome));
             }
             ManagerCommand::PauseAll { reply } => {
                 let mut n = 0;
@@ -877,6 +892,10 @@ impl Inner {
     }
 
     async fn remove_task(&mut self, id: &str) -> BiliResult<()> {
+        self.remove_task_inner(id, true).await
+    }
+
+    async fn remove_task_inner(&mut self, id: &str, schedule: bool) -> BiliResult<()> {
         if !self.tasks.contains_key(id) {
             return Err(BiliError::Other(format!("task not found: {id}")));
         }
@@ -903,11 +922,13 @@ impl Inner {
         self.dirty.remove(id);
         self.emit(TaskEvent::Removed { id: id.to_string() });
         self.publish();
-        self.schedule();
+        if schedule {
+            self.schedule();
+        }
         Ok(())
     }
 
-    async fn clear_finished(&mut self) -> usize {
+    async fn clear_finished(&mut self) -> ClearOutcome {
         let ids: Vec<TaskId> = self
             .order
             .iter()
@@ -919,13 +940,14 @@ impl Inner {
             })
             .cloned()
             .collect();
-        let mut removed = 0usize;
+        let mut outcome = ClearOutcome::default();
         for id in &ids {
             let db = Arc::clone(self.storage.db());
             let task_id = id.clone();
             // design D2/3.7：删除成功后才发布移除；失败保留记录并暴露诊断。
             if let Err(error) = spawn_blocking_db(move || db.delete_task(&task_id)).await {
                 tracing::warn!(task = %id, error = %error, "删除已完成任务失败，保留队列记录");
+                outcome.failed.push(id.clone());
                 continue;
             }
             self.tasks.remove(id);
@@ -933,12 +955,49 @@ impl Inner {
             self.dirty.remove(id);
             self.cleanup_temp(id).await;
             self.emit(TaskEvent::Removed { id: id.clone() });
-            removed += 1;
+            outcome.removed += 1;
         }
         self.order.retain(|id| self.tasks.contains_key(id));
         self.emit(TaskEvent::QueueChanged);
         self.publish();
-        removed
+        outcome
+    }
+
+    /// 清空未激活任务：同一 actor 内先确定目标，再逐条检查删除，最后统一补调度，
+    /// 避免逐项删除时提前启动本批待移除任务（design D2/3.5）。
+    async fn clear_inactive(&mut self) -> ClearOutcome {
+        let ids: Vec<TaskId> = self
+            .order
+            .iter()
+            .filter(|id| {
+                self.tasks
+                    .get(*id)
+                    .map(|view| {
+                        matches!(
+                            view.phase,
+                            TaskPhase::Queued | TaskPhase::Paused | TaskPhase::Cancelled
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        let mut outcome = ClearOutcome::default();
+        for id in &ids {
+            match self.remove_task_inner(id, false).await {
+                Ok(()) => outcome.removed += 1,
+                Err(error) => {
+                    tracing::warn!(task = %id, error = %error, "清理未激活任务失败，保留队列记录");
+                    outcome.failed.push(id.clone());
+                }
+            }
+        }
+        if outcome.removed > 0 {
+            self.emit(TaskEvent::QueueChanged);
+        }
+        self.publish();
+        self.schedule();
+        outcome
     }
 
     fn apply_settings(&mut self, settings: Settings) -> BiliResult<()> {
@@ -2399,8 +2458,9 @@ mod tests {
             s.tasks.iter().all(|t| t.phase == TaskPhase::Done)
         })
         .await;
-        let removed = h.manager.clear_finished().await.unwrap();
-        assert_eq!(removed, 1);
+        let outcome = h.manager.clear_finished().await.unwrap();
+        assert_eq!(outcome.removed, 1);
+        assert!(outcome.failed.is_empty());
         assert!(h.manager.snapshot().tasks.is_empty());
         h.manager.flush().await.unwrap();
         assert_eq!(h.storage.db().load_tasks().unwrap().len(), 0);
@@ -3024,6 +3084,99 @@ mod tests {
         h.manager.retry_persistence().await.unwrap();
         h.manager.prepare_shutdown().await.unwrap();
         h.manager.finalize_shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_inactive_removes_only_queued_paused_cancelled() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(
+            Settings {
+                max_concurrent: 1,
+                ..Default::default()
+            },
+            behavior,
+        )
+        .await;
+        let mut ids: Vec<TaskId> = Vec::new();
+        for i in 0..4 {
+            ids.push(
+                h.manager
+                    .enqueue(vec![spec(&format!("BV{i}"))])
+                    .await
+                    .unwrap()[0]
+                    .clone(),
+            );
+        }
+        let (running, queued, paused, cancelled) =
+            (ids[0].clone(), ids[1].clone(), ids[2].clone(), ids[3].clone());
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == running && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        h.manager.pause(&paused).await.unwrap();
+        wait_for(&h.manager, |s| {
+            s.tasks.iter().any(|t| t.id == paused && t.phase == TaskPhase::Paused)
+        })
+        .await;
+        h.manager.cancel(&cancelled).await.unwrap();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == cancelled && t.phase == TaskPhase::Cancelled)
+        })
+        .await;
+        let outcome = h.manager.clear_inactive().await.unwrap();
+        assert_eq!(outcome.removed, 3, "排队/暂停/已取消都应移除");
+        assert!(outcome.failed.is_empty());
+        let snap = h.manager.snapshot();
+        assert_eq!(snap.tasks.len(), 1, "运行中的任务必须保留");
+        assert_eq!(snap.tasks[0].id, running);
+        assert_eq!(snap.tasks[0].phase, TaskPhase::Downloading);
+        assert_eq!(h.storage.db().load_tasks().unwrap().len(), 1);
+        let _ = queued;
+        h.manager.cancel(&running).await.unwrap();
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_inactive_reports_partial_failure_and_keeps_rows() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(
+            Settings {
+                max_concurrent: 1,
+                ..Default::default()
+            },
+            behavior,
+        )
+        .await;
+        h.manager.enqueue(vec![spec("BV1")]).await.unwrap();
+        let queued_a = h.manager.enqueue(vec![spec("BV2")]).await.unwrap()[0].clone();
+        let queued_b = h.manager.enqueue(vec![spec("BV3")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks.iter().any(|t| t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        // 第一次删除失败：该行保留并计入 failed，另一行成功移除。
+        h.storage.db().fail_next_delete_once();
+        let outcome = h.manager.clear_inactive().await.unwrap();
+        assert_eq!(outcome.removed, 1);
+        assert_eq!(outcome.failed.len(), 1);
+        let snapshot = h.manager.snapshot();
+        assert_eq!(snapshot.tasks.len(), 2, "失败行必须保留可见");
+        assert!(
+            snapshot
+                .tasks
+                .iter()
+                .any(|t| t.id == queued_a || t.id == queued_b)
+        );
+        // 再次清理可移除剩余目标。
+        let retry = h.manager.clear_inactive().await.unwrap();
+        assert_eq!(retry.removed, 1);
+        h.manager.shutdown().await.unwrap();
     }
 
     trait NoSpeed {

@@ -241,6 +241,9 @@ pub struct TaskDTO {
     pub duration_secs: Option<u64>,
     #[serde(default)]
     pub extras: TaskExtrasDTO,
+    /// 记录保存失败的可读原因（design D8/3.8）；None = 已可靠保存。
+    #[serde(default)]
+    pub persist_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -768,6 +771,7 @@ pub fn task_dto(view: &TaskView, settings: &Settings, sort_index: i64) -> TaskDT
         output_dir: Some(output_dir),
         duration_secs: None,
         extras: TaskExtrasDTO::from(&view.extras),
+        persist_error: view.persist_error.clone(),
     }
 }
 
