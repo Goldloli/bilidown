@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::state::FileStatusCache;
+
 // ---------------------------------------------------------------------------
 // 错误
 // ---------------------------------------------------------------------------
@@ -659,6 +661,17 @@ fn artifact_kind_str(kind: bilidown_core::ArtifactKind) -> &'static str {
 #[derive(Default)]
 pub struct FileProbe {
     entries: HashMap<String, Option<(bool, u64)>>,
+    /// 跨批次展示缓存（design D9/7.2）；权威操作不走此缓存。
+    cache: Option<std::sync::Arc<FileStatusCache>>,
+}
+
+impl FileProbe {
+    pub fn with_cache(cache: std::sync::Arc<FileStatusCache>) -> Self {
+        Self {
+            cache: Some(cache),
+            ..Self::default()
+        }
+    }
 }
 
 impl FileProbe {
@@ -666,14 +679,21 @@ impl FileProbe {
         if let Some(hit) = self.entries.get(path) {
             return *hit;
         }
+        if let Some(cached) = self.cache.as_ref().and_then(|cache| cache.lookup(path)) {
+            self.entries.insert(path.to_string(), cached);
+            return cached;
+        }
         let probed = std::fs::metadata(path)
             .ok()
             .map(|metadata| (metadata.is_file(), metadata.len()));
+        if let Some(cache) = &self.cache {
+            cache.remember(path, probed);
+        }
         self.entries.insert(path.to_string(), probed);
         probed
     }
 
-    fn exists(&mut self, path: &str) -> bool {
+    pub fn exists(&mut self, path: &str) -> bool {
         self.lookup(path).is_some_and(|(is_file, _)| is_file)
     }
 
@@ -911,9 +931,13 @@ pub fn snapshot_dto(
     snapshot: &QueueSnapshot,
     account: &AccountState,
     settings: &Settings,
+    cache: Option<&std::sync::Arc<FileStatusCache>>,
 ) -> QueueSnapshotDTO {
-    // 同一批次内按路径复用文件状态探测（design D10/7.1）。
-    let mut probe = FileProbe::default();
+    // 同一批次内按路径复用文件状态探测（design D10/7.1），并命中跨批次展示缓存。
+    let mut probe = match cache {
+        Some(cache) => FileProbe::with_cache(std::sync::Arc::clone(cache)),
+        None => FileProbe::default(),
+    };
     QueueSnapshotDTO {
         revision: snapshot.seq,
         tasks: snapshot

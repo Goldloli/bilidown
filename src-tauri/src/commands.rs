@@ -89,8 +89,8 @@ fn history_entries(core: &Core, query: &HistoryQuery) -> CommandResult<Vec<Histo
         .db()
         .list_history(query)
         .map_err(AppErrorDTO::from)?;
-    // 一次历史查询内共享文件状态探测（design D10/7.1）。
-    let mut probe = FileProbe::default();
+    // 一次历史查询内共享文件状态探测，并命中跨批次展示缓存（design D10/7.1、D9/7.2）。
+    let mut probe = FileProbe::with_cache(std::sync::Arc::clone(&core.file_status));
     Ok(rows
         .into_iter()
         .map(|row| history_dto_with_probe(row, &mut probe))
@@ -385,6 +385,7 @@ pub async fn list_queue(state: State<'_, ShellState>) -> CommandResult<QueueSnap
         &snapshot_of(&core),
         &core.account(),
         &core.settings(),
+        Some(&core.file_status),
     ))
 }
 
@@ -726,29 +727,57 @@ pub async fn pick_directory(app: AppHandle) -> CommandResult<Option<String>> {
     }
 }
 
+/// 文件缺失的可读错误：前端据此提示重新下载/重新解析（design D8/3.3）。
+fn file_missing_error(path: &PathBuf) -> AppErrorDTO {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    AppErrorDTO {
+        kind: "file-missing".into(),
+        message: format!("文件不存在或已被移动：{name}"),
+        actions: vec!["retry-download".into()],
+    }
+}
+
+fn invalidate_file_status(core: Option<&Core>, path: &str) {
+    if let Some(core) = core {
+        core.file_status.invalidate(path);
+    }
+}
+
 #[tauri::command]
 pub async fn reveal_output(
     app: AppHandle,
     state: State<'_, ShellState>,
     task_id: String,
 ) -> CommandResult<()> {
-    let core = core_of(&state).await?;
-    let path = core
-        .snapshot()
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .and_then(|task| task.output_path.clone())
-        .ok_or_else(|| AppErrorDTO::new("unknown", format!("任务 {task_id} 还没有输出文件")))?;
-    reveal_path(app, path)
-}
-
-#[tauri::command]
-pub fn reveal_path(app: AppHandle, path: String) -> CommandResult<()> {
     use tauri_plugin_opener::OpenerExt;
+    let core = core_of(&state).await?;
+    // 多产物任务优先定位第一个主产物；旧记录回退 output_path（design D7/3.3）。
+    let path = {
+        let snapshot = core.snapshot();
+        let task = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .ok_or_else(|| AppErrorDTO::new("unknown", format!("任务不存在：{task_id}")))?;
+        task.artifacts
+            .first()
+            .map(|artifact| artifact.path.clone())
+            .or_else(|| task.output_path.clone())
+            .ok_or_else(|| AppErrorDTO::new("unknown", format!("任务 {task_id} 还没有输出文件")))?
+    };
+    // 文件操作前做权威校验，不信任展示缓存（design D9/7.2）。
+    if !PathBuf::from(&path).is_file() {
+        invalidate_file_status(Some(&core), &path);
+        crate::events::emit(&app, crate::events::FILES_INVALIDATED, ());
+        return Err(file_missing_error(&PathBuf::from(&path)));
+    }
     app.opener()
         .reveal_item_in_dir(PathBuf::from(&path))
         .map_err(|e| {
+            invalidate_file_status(Some(&core), &path);
             AppErrorDTO::new(
                 "unknown",
                 format!("{}失败: {e}", crate::platform::REVEAL_LABEL),
@@ -757,8 +786,41 @@ pub fn reveal_path(app: AppHandle, path: String) -> CommandResult<()> {
 }
 
 #[tauri::command]
-pub fn open_file(app: AppHandle, path: String) -> CommandResult<()> {
+pub async fn reveal_path(
+    app: AppHandle,
+    state: State<'_, ShellState>,
+    path: String,
+) -> CommandResult<()> {
     use tauri_plugin_opener::OpenerExt;
+    let core = state.try_core();
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        invalidate_file_status(core.as_deref(), &path);
+        return Err(file_missing_error(&target));
+    }
+    app.opener()
+        .reveal_item_in_dir(&target)
+        .map_err(|e| {
+            invalidate_file_status(core.as_deref(), &path);
+            AppErrorDTO::new(
+                "unknown",
+                format!("{}失败: {e}", crate::platform::REVEAL_LABEL),
+            )
+        })
+}
+
+#[tauri::command]
+pub async fn open_file(
+    app: AppHandle,
+    state: State<'_, ShellState>,
+    path: String,
+) -> CommandResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let core = state.try_core();
+    if !PathBuf::from(&path).is_file() {
+        invalidate_file_status(core.as_deref(), &path);
+        return Err(file_missing_error(&PathBuf::from(&path)));
+    }
     app.opener()
         .open_path(path, None::<&str>)
         .map_err(|e| AppErrorDTO::new("unknown", format!("打开文件失败: {e}")))
@@ -766,9 +828,12 @@ pub fn open_file(app: AppHandle, path: String) -> CommandResult<()> {
 
 #[tauri::command]
 pub async fn show_logs(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    use tauri_plugin_opener::OpenerExt;
     let dir = state.log_dir();
     let _ = std::fs::create_dir_all(&dir);
-    reveal_path(app, dir.to_string_lossy().into_owned())
+    app.opener()
+        .reveal_item_in_dir(&dir)
+        .map_err(|e| AppErrorDTO::new("unknown", format!("打开日志目录失败: {e}")))
 }
 
 #[tauri::command]

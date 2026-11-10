@@ -24,6 +24,45 @@ use tokio::sync::watch;
 
 use crate::{dock, dto, events, menu};
 
+/// 文件状态展示缓存（design D9/7.2）：只缓存路径的 is_file/len，TTL 5 秒；
+/// 恢复/继续/文件操作等权威路径始终重新校验，不信任该缓存。
+#[derive(Default)]
+pub struct FileStatusCache {
+    entries: Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(bool, u64)>)>>,
+}
+
+const FILE_STATUS_TTL: Duration = Duration::from_secs(5);
+
+impl FileStatusCache {
+    /// 仅返回仍在 TTL 内的缓存值。
+    pub fn lookup(&self, path: &str) -> Option<Option<(bool, u64)>> {
+        let entries = self.entries.lock().ok()?;
+        entries.get(path).and_then(|(at, value)| {
+            (at.elapsed() < FILE_STATUS_TTL).then_some(*value)
+        })
+    }
+
+    pub fn remember(&self, path: &str, probed: Option<(bool, u64)>) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(path.to_string(), (std::time::Instant::now(), probed));
+        }
+    }
+
+    /// 权威文件操作后失效单条记录（design D9/7.2）。
+    pub fn invalidate(&self, path: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.remove(path);
+        }
+    }
+
+    /// 窗口重新激活/列表打开等场景整体失效（design D9/7.2）。
+    pub fn invalidate_all(&self) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.clear();
+        }
+    }
+}
+
 /// core 初始化状态（命令等待用；失败时立即返回错误而不是永远挂起）。
 #[derive(Debug, Clone)]
 enum InitState {
@@ -45,6 +84,8 @@ pub struct Core {
     settings_revision: AtomicU64,
     /// 网络准备代次（design D5/5.4）：旧结果不得覆盖新状态。
     network_generation: AtomicU64,
+    /// 文件状态展示缓存（design D9/7.2）；restore/文件操作不走缓存。
+    pub file_status: Arc<FileStatusCache>,
     account: RwLock<AccountState>,
     /// 进行中的扫码登录流程（`account::login_poll` 需要 &mut）。
     login: Mutex<Option<QrLogin>>,
@@ -346,7 +387,7 @@ pub fn spawn_init(app: AppHandle) {
                 events::emit(
                     &app,
                     events::QUEUE_SNAPSHOT,
-                    dto::snapshot_dto(&snapshot, &account, &settings),
+                    dto::snapshot_dto(&snapshot, &account, &settings, Some(&core.file_status)),
                 );
                 events::emit(&app, events::ACCOUNT_CHANGED, dto::account_dto(&account));
                 let mut dto = dto::settings_dto(&settings);
@@ -551,6 +592,7 @@ async fn init_local_core() -> BiliResult<Arc<Core>> {
         settings_commit: tokio::sync::Mutex::new(()),
         settings_revision: AtomicU64::new(0),
         network_generation: AtomicU64::new(0),
+        file_status: Arc::new(FileStatusCache::default()),
         account: RwLock::new(AccountState::default()),
         login: Mutex::new(None),
     }))
@@ -559,6 +601,7 @@ async fn init_local_core() -> BiliResult<Arc<Core>> {
 /// watch<QueueSnapshot> → `queue://snapshot` + 菜单可用性 + Dock 徽标。
 fn spawn_snapshot_bridge(app: &AppHandle, core: &Arc<Core>) {
     let app = app.clone();
+    let core = Arc::clone(core);
     let mut rx = core.manager.subscribe_snapshot();
     tauri::async_runtime::spawn(async move {
         // 系统集成按「可见变化」更新，相同状态不重复设置（design D10/7.5）。
@@ -580,7 +623,7 @@ fn spawn_snapshot_bridge(app: &AppHandle, core: &Arc<Core>) {
             events::emit(
                 &app,
                 events::QUEUE_SNAPSHOT,
-                dto::snapshot_dto(&snapshot, &account, &settings),
+                dto::snapshot_dto(&snapshot, &account, &settings, Some(&core.file_status)),
             );
             let counts = MenuCounts::from_snapshot(&snapshot);
             if last_counts != Some(counts) || last_logged_in != Some(account.logged_in) {
@@ -808,4 +851,163 @@ fn spawn_clipboard_watch(app: &AppHandle) {
             );
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bilidown_core::storage::AppPaths;
+
+    async fn test_core(dir: &std::path::Path) -> Arc<Core> {
+        let paths = AppPaths::new(dir.to_path_buf());
+        let storage = Arc::new(Storage::open_with_legacy(paths.clone(), None).unwrap());
+        let settings = storage.load_settings();
+        let client = Arc::new(BiliClient::new(None, Default::default()).unwrap());
+        let manager = TaskManager::start(TaskManagerConfig::new(
+            client.clone(),
+            Arc::clone(&storage),
+            settings.clone(),
+        ))
+        .await
+        .unwrap();
+        Arc::new(Core {
+            paths: storage.paths().clone(),
+            storage,
+            client: RwLock::new(client),
+            manager,
+            settings: RwLock::new(settings),
+            settings_commit: tokio::sync::Mutex::new(()),
+            settings_revision: AtomicU64::new(0),
+            network_generation: AtomicU64::new(0),
+            file_status: Arc::new(FileStatusCache::default()),
+            account: RwLock::new(AccountState::default()),
+            login: Mutex::new(None),
+        })
+    }
+
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bilidown-state-{tag}-{}-{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn now_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn file_status_cache_is_invalidated_before_reuse() {
+        use crate::dto::FileProbe;
+        let dir = unique_dir("file-cache");
+        let path = dir.join("a.mp4");
+        std::fs::write(&path, b"abc").unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+        let cache = Arc::new(FileStatusCache::default());
+        let mut probe = FileProbe::with_cache(Arc::clone(&cache));
+        assert!(probe.exists(&path_str), "首次探测应命中磁盘");
+        // 外部删除后，未失效前仍可能读到缓存（设计允许 TTL 内展示缓存）；
+        std::fs::remove_file(&path).unwrap();
+        // 窗口激活/操作失败会失效缓存，之后必须读到新状态，不把未知当有效。
+        cache.invalidate_all();
+        let mut probe = FileProbe::with_cache(Arc::clone(&cache));
+        assert!(!probe.exists(&path_str), "失效后不得把已删除文件当作有效");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn update_settings_serializes_concurrent_patches() {
+        let dir = unique_dir("commit");
+        let core = test_core(&dir).await;
+        // 两个并发补丁改不同字段：都必须保留，修订号单调递增（design D3/4.2）。
+        let first = {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move {
+                core.update_settings(|current| {
+                    let mut next = current.clone();
+                    next.max_concurrent = 5;
+                    Ok(next)
+                })
+                .await
+            })
+        };
+        let second = {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move {
+                core.update_settings(|current| {
+                    let mut next = current.clone();
+                    next.download_subtitle = true;
+                    Ok(next)
+                })
+                .await
+            })
+        };
+        let first = first.await.unwrap().unwrap();
+        let second = second.await.unwrap().unwrap();
+        assert_eq!(first.max(second), 2, "两次提交应得到两个递增修订号");
+        let settings = core.settings();
+        assert_eq!(settings.max_concurrent, 5);
+        assert!(settings.download_subtitle);
+        // 持久化到设置文件。
+        let stored = core.storage.load_settings();
+        assert_eq!(stored.max_concurrent, 5);
+        assert!(stored.download_subtitle);
+        core.manager.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_settings_persist_failure_keeps_runtime_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_dir("persist-fail");
+        let core = test_core(&dir).await;
+        let before = core.settings();
+        let revision_before = core.settings_revision();
+        // 让设置目录不可写：持久化失败时不得提交运行态（design D3/4.2）。
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        let result = core
+            .update_settings(|current| {
+                let mut next = current.clone();
+                next.max_concurrent = 7;
+                Ok(next)
+            })
+            .await;
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        assert!(result.is_err(), "写盘失败必须返回错误");
+        assert_eq!(core.settings().max_concurrent, before.max_concurrent);
+        assert_eq!(core.settings_revision(), revision_before);
+        core.manager.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn update_settings_invalid_value_is_rejected_before_commit() {
+        let dir = unique_dir("invalid");
+        let core = test_core(&dir).await;
+        let before = core.settings();
+        let result = core
+            .update_settings(|current| {
+                let mut next = current.clone();
+                next.max_concurrent = 0;
+                Ok(next)
+            })
+            .await;
+        assert!(result.is_err(), "并发 0 必须被拒绝");
+        assert_eq!(core.settings().max_concurrent, before.max_concurrent);
+        assert_eq!(core.settings_revision(), 0);
+        core.manager.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
