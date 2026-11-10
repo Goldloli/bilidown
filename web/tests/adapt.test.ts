@@ -4,10 +4,13 @@ import {
   accountFromDTO,
   defaultInternalSettings,
   parseItemFromDTO,
+  parseResultFromDTO,
+  reuseUnchangedTasks,
   settingsFromDTO,
   settingsToDTO,
   snapshotFromDTO,
   taskFromDTO,
+  taskToDTO,
 } from '../src/lib/adapt';
 import type {
   HistoryEntryDTO,
@@ -99,6 +102,17 @@ describe('adapt：契约 DTO ↔ UI 模型', () => {
     expect(task.error?.actions).toEqual(['relogin']);
   });
 
+  it('persistError 映射到内部模型并可往返（design D8/3.8）', () => {
+    const task = taskFromDTO(
+      makeTaskDTO({ status: 'done', persistError: '任务记录保存失败：database is locked' }),
+    );
+    expect(task.persistError).toBe('任务记录保存失败：database is locked');
+    expect(taskToDTO(task).persistError).toBe('任务记录保存失败：database is locked');
+
+    const clean = taskFromDTO(makeTaskDTO());
+    expect(clean.persistError).toBeNull();
+  });
+
   it('QueueSnapshotDTO → 内部分类统计与账号能力', () => {
     const dto: QueueSnapshotDTO = {
       revision: 3,
@@ -114,6 +128,23 @@ describe('adapt：契约 DTO ↔ UI 模型', () => {
     expect(snapshot.account.signedIn).toBe(false);
     expect(snapshot.account.capability.signedInMax).toBe(1080);
     expect(snapshot.account.capability.vipMax).toBe(2160);
+  });
+
+  it('无 qualities 兜底：网络校验未完成时不按临时匿名态限制清晰度（tasks 5.4）', () => {
+    const dto = {
+      kind: 'video',
+      sourceId: 'BV1',
+      title: '示例',
+      coverUrl: null,
+      pageUrl: 'https://www.bilibili.com/video/BV1',
+      owner: 'UP',
+      entries: [{ index: 0, title: 'P1', selectedDefault: true }],
+      rawInput: 'https://www.bilibili.com/video/BV1',
+    } as ParseResultDTO;
+    const unvalidated = parseResultFromDTO(dto, ANONYMOUS_ACCOUNT, false);
+    expect(unvalidated.items[0]?.qualities.every((quality) => quality.available)).toBe(true);
+    const validated = parseResultFromDTO(dto, ANONYMOUS_ACCOUNT, true);
+    expect(validated.items[0]?.qualities.some((quality) => !quality.available)).toBe(true);
   });
 
   it('账号映射：匿名 / 登录 / 大会员', () => {
@@ -261,5 +292,29 @@ describe('adapt：契约 DTO ↔ UI 模型', () => {
     expect(item.entries.filter((entry) => entry.selectedByDefault)).toHaveLength(1);
     expect(item.qualities[0].label).toBe('1080P');
     expect(item.uploader).toBe('示例制作组');
+  });
+});
+
+describe('快照热更新对象复用（tasks 7.3）', () => {
+  it('未变化任务复用旧对象，只有进度/阶段变化的任务换成新对象', () => {
+    const doneOld = taskFromDTO(
+      makeTaskDTO({ id: 'done-1', status: 'done', updatedAt: 2_000 }),
+    );
+    const doneNew = taskFromDTO(
+      makeTaskDTO({ id: 'done-1', status: 'done', updatedAt: 2_000 }),
+    );
+    const activeOld = taskFromDTO(
+      makeTaskDTO({ id: 'active-1', status: 'downloading', updatedAt: 2_000 }),
+    );
+    const activeNew = taskFromDTO(
+      makeTaskDTO({ id: 'active-1', status: 'downloading', updatedAt: 3_000 }),
+    );
+    const reused = reuseUnchangedTasks(
+      [doneOld, activeOld],
+      [doneNew, activeNew],
+    );
+    expect(reused[0]).toBe(doneOld);
+    expect(reused[1]).toBe(activeNew);
+    expect(reused[1]).not.toBe(activeOld);
   });
 });

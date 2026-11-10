@@ -1,6 +1,9 @@
+import '../i18n/zh-CN.dynamic';
 import { t } from '../i18n/zh-CN';
 import { api } from '../lib/ipc';
 import { isMockMode, isPending, pendingLabel } from '../lib/capabilities';
+import { errorMessageOf } from '../lib/errors';
+import { taskFileTarget } from '../lib/fileAccess';
 import { mockTaskExtras } from '../dev/detailExtras';
 import { formatBytes, formatDateTime, formatDuration, formatEta, formatPercent, formatSpeed } from '../lib/format';
 import { codecLabel, errorActionLabel, kindLabel, phaseLabel, statusLabel } from '../lib/media';
@@ -30,6 +33,8 @@ export function TaskDetailPanel({ taskId, onClose }: { taskId: string; onClose: 
   const resume = useQueueStore((s) => s.resume);
   const cancel = useQueueStore((s) => s.cancel);
   const retry = useQueueStore((s) => s.retry);
+  const retryPersistence = useQueueStore((s) => s.retryPersistence);
+  const filesVerified = useQueueStore((s) => s.filesVerified);
   const openPanel = useUiStore((s) => s.openPanel);
   const pushToast = useUiStore((s) => s.pushToast);
 
@@ -68,6 +73,26 @@ export function TaskDetailPanel({ taskId, onClose }: { taskId: string; onClose: 
   const hasExtras = Boolean(
     extras && (extras.subtitles.length > 0 || extras.cover || extras.subtitleError || extras.coverError),
   );
+  // 打开/定位前检查附件状态：缺失或大小不符时给出可读提示，不显示虚假成功
+  const fileTarget = taskFileTarget(task);
+  const revealFile = () => {
+    if (!fileTarget.available) {
+      pushToast({ kind: 'warning', message: fileTarget.reason ?? t('file.missing') });
+      return;
+    }
+    void api.openInFinder(fileTarget.path).catch((error) => {
+      pushToast({ kind: 'error', message: t('file.revealFailed', { message: errorMessageOf(error) }) });
+    });
+  };
+  const openFile = () => {
+    if (!fileTarget.available) {
+      pushToast({ kind: 'warning', message: fileTarget.reason ?? t('file.missing') });
+      return;
+    }
+    void api.openFile(fileTarget.path).catch((error) => {
+      pushToast({ kind: 'error', message: t('file.openFailed', { message: errorMessageOf(error) }) });
+    });
+  };
 
   const onErrorAction = (action: ErrorAction) => {
     switch (action) {
@@ -152,6 +177,33 @@ export function TaskDetailPanel({ taskId, onClose }: { taskId: string; onClose: 
         {task.error && (
           <div className="mt-4">
             <ErrorBanner error={task.error} onAction={onErrorAction} onRetry={() => void retry(task.id)} />
+          </div>
+        )}
+
+        {task.persistError && (
+          <div
+            className="mt-4 rounded-card border border-line p-3"
+            style={{ background: 'var(--card-inset)' }}
+            role="alert"
+          >
+            <div className="flex items-start gap-2">
+              <Icon name="warning" size={16} className="mt-0.5 shrink-0 text-warning" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium text-fg">{t('persist.title')}</p>
+                <p className="mt-1 break-all text-2xs leading-[15px] text-fg2">{task.persistError}</p>
+                <p className="mt-1 text-2xs text-fg3">{t('persist.body')}</p>
+                <div className="mt-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon="refresh"
+                    onClick={() => void retryPersistence()}
+                  >
+                    {t('persist.retry')}
+                  </Button>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -275,7 +327,7 @@ export function TaskDetailPanel({ taskId, onClose }: { taskId: string; onClose: 
             {task.artifactCoverage === 'legacy-single' && (
               <p className="mb-2 text-2xs text-warning">{t('artifacts.legacy')}</p>
             )}
-            <ArtifactList artifacts={artifacts} />
+            <ArtifactList artifacts={artifacts} filesVerified={filesVerified} />
           </div>
         )}
 
@@ -344,7 +396,7 @@ export function TaskDetailPanel({ taskId, onClose }: { taskId: string; onClose: 
                 disabled={isPending('reveal')}
                 title={pendingLabel('reveal', t('detail.reveal'))}
                 onClick={() => {
-                  if (!isPending('reveal')) void api.openInFinder(task.outputPath ?? '');
+                  if (!isPending('reveal')) revealFile();
                 }}
               >
                 {t('detail.reveal')}
@@ -356,7 +408,7 @@ export function TaskDetailPanel({ taskId, onClose }: { taskId: string; onClose: 
                 disabled={isPending('open-file')}
                 title={pendingLabel('open-file', t('detail.openFile'))}
                 onClick={() => {
-                  if (!isPending('open-file')) void api.openFile(task.outputPath ?? '');
+                  if (!isPending('open-file')) openFile();
                 }}
               >
                 {t('detail.openFile')}

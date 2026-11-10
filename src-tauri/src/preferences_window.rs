@@ -104,7 +104,9 @@ where
     window.run_on_main_thread(move || {
         let _ = send.send(action(&owned));
     })?;
-    receive.await.map_err(|_| tauri::Error::FailedToReceiveMessage)?
+    receive
+        .await
+        .map_err(|_| tauri::Error::FailedToReceiveMessage)?
 }
 
 fn position_or_fallback(window: &WebviewWindow) {
@@ -173,7 +175,12 @@ mod tests {
     use super::*;
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
-        Rect { x, y, width, height }
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     fn locate(anchor: Rect, work: Rect, width: u32, height: u32) -> (i32, i32) {
@@ -200,7 +207,12 @@ mod tests {
     #[test]
     fn odd_size_differences_keep_centers_within_one_pixel() {
         for size in [(879, 599), (1025, 681)] {
-            let (x, y) = locate(rect(200, 100, 1024, 680), rect(0, 0, 1920, 1040), size.0, size.1);
+            let (x, y) = locate(
+                rect(200, 100, 1024, 680),
+                rect(0, 0, 1920, 1040),
+                size.0,
+                size.1,
+            );
             assert!((2 * x + size.0 as i32 - (2 * 200 + 1024)).abs() <= 1);
             assert!((2 * y + size.1 as i32 - (2 * 100 + 680)).abs() <= 1);
         }
@@ -209,7 +221,12 @@ mod tests {
     #[test]
     fn negative_monitor_coordinates_remain_signed() {
         assert_eq!(
-            locate(rect(-2400, -100, 1536, 1020), rect(-2560, -200, 2560, 1440), 1320, 900),
+            locate(
+                rect(-2400, -100, 1536, 1020),
+                rect(-2560, -200, 2560, 1440),
+                1320,
+                900
+            ),
             (-2292, -40)
         );
     }
@@ -225,7 +242,12 @@ mod tests {
     #[test]
     fn top_left_respects_work_area_offsets() {
         assert_eq!(
-            locate(rect(-100, -100, 1024, 680), rect(80, 60, 1840, 1020), 880, 600),
+            locate(
+                rect(-100, -100, 1024, 680),
+                rect(80, 60, 1840, 1020),
+                880,
+                600
+            ),
             (80, 60)
         );
     }
@@ -233,7 +255,12 @@ mod tests {
     #[test]
     fn oversized_window_keeps_title_and_close_button_inside_work_area() {
         assert_eq!(
-            locate(rect(200, 100, 1024, 680), rect(0, 40, 1920, 1000), 2600, 1400),
+            locate(
+                rect(200, 100, 1024, 680),
+                rect(0, 40, 1920, 1000),
+                2600,
+                1400
+            ),
             (-680, 40)
         );
     }

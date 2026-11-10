@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { t } from '../i18n/zh-CN';
+import { retryStartupSection } from '../lib/bootstrap';
 import { useQueueStore } from '../stores/useQueueStore';
 import { useUiStore } from '../stores/useUiStore';
 import { Button } from '../components/Button';
@@ -59,7 +60,15 @@ export function QueueView() {
         subtitle={error}
         hint={undefined}
       >
-        <Button variant="secondary" icon="refresh" onClick={() => void refresh()}>
+        <Button
+          variant="secondary"
+          icon="refresh"
+          onClick={() => {
+            // 核心失败时复用同一初始化任务；否则只重载队列分区（tasks 5.3）。
+            if (useQueueStore.getState().error) void retryStartupSection('queue');
+            else void refresh();
+          }}
+        >
           {t('queue.error.retry')}
         </Button>
       </EmptyState>

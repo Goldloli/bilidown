@@ -4,6 +4,7 @@ import type {
   AddOptionsDTO,
   AddTasksResultDTO,
   AppInfoDTO,
+  ClearOutcomeDTO,
   ContractHistoryStatus,
   HistoryEntryDTO,
   HistoryFilterDTO,
@@ -13,10 +14,14 @@ import type {
   ParseResultDTO,
   QueueSnapshotDTO,
   SettingsDTO,
+  SettingsPatchDTO,
   TaskEventDTO,
 } from './contract';
 import type {
   AccountState,
+  ClearOutcome,
+  EnqueueFailure,
+  EnqueueOutcome,
   EnqueueSelection,
   HistoryEntry,
   HistoryQuery,
@@ -28,7 +33,6 @@ import type {
   QueueTask,
   Settings,
   SettingsPatch,
-  SettingsValidationIssue,
 } from './types';
 import {
   ANONYMOUS_ACCOUNT,
@@ -36,14 +40,15 @@ import {
   historyFromDTO,
   loginChallengeFromDTO,
   loginPollFromDTO,
-  mergeSettings,
   parseResultFromDTO,
   settingsFromDTO,
-  settingsToDTO,
+  settingsPatchToDTO,
+  settingsRevisionOf,
   snapshotFromDTO,
-  validateSettings,
+  type AdaptedSettings,
 } from './adapt';
-import { readGlassPref } from './glass';
+import { requiresAddConfirmation } from './addSelection';
+import { errorMessageOf } from './errors';
 
 export type { ContractEventName };
 
@@ -54,7 +59,14 @@ export type { ContractEventName };
 export interface Backend {
   getAppInfo(): Promise<AppInfoDTO>;
   openPreferences(): Promise<void>;
+  /** 保存失败时 reject（AppError），不再总是退出；前端提供重试/仍然退出（design D8/3.9） */
   quitApp(): Promise<void>;
+  /** 用户明确放弃未保存状态后强制退出 */
+  forceQuitApp(): Promise<void>;
+  /** 本地初始化失败后重试；仅在 core 未就绪时生效（design D5/5.4） */
+  retryInit(): Promise<void>;
+  /** 本地已就绪时重新尝试设备激活/账号恢复（design D5/5.4） */
+  retryNetwork(): Promise<void>;
   getDiagnostics(): Promise<string>;
 
   parseInput(input: string): Promise<ParseResultDTO>;
@@ -68,8 +80,10 @@ export interface Backend {
   startAll(): Promise<number>;
   pauseAll(): Promise<number>;
   retryAll(): Promise<number>;
-  clearFinished(): Promise<number>;
-  clearInactive(): Promise<number>;
+  clearFinished(): Promise<ClearOutcomeDTO>;
+  clearInactive(): Promise<ClearOutcomeDTO>;
+  /** 仅重试待保存动作（记录/完成事务/历史），不清空产物、不重新下载 */
+  retryPersistence(): Promise<void>;
 
   getAccount(): Promise<AccountInfoDTO | null>;
   loginStart(): Promise<LoginStartDTO>;
@@ -79,6 +93,8 @@ export interface Backend {
 
   getSettings(): Promise<SettingsDTO>;
   setSettings(settings: SettingsDTO): Promise<SettingsDTO>;
+  /** 增量提交（design D3）；省略字段=保持不变，null=清空可空字段 */
+  patchSettings(patch: SettingsPatchDTO): Promise<SettingsDTO>;
 
   listHistory(filter?: HistoryFilterDTO): Promise<HistoryEntryDTO[]>;
   removeHistory(id: string): Promise<void>;
@@ -113,24 +129,49 @@ export interface ScenarioBootstrap {
   taskId?: string;
   category?: string;
   notices?: import('./types').AppNotice[];
+  /** 退出保存失败弹窗（dev QA 场景） */
+  quitFailure?: string;
 }
 
 export type { EnqueueSelection };
 
-function errorMessage(error: unknown): string {
-  if (error && typeof error === 'object' && 'message' in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return error instanceof Error ? error.message : String(error);
+function clearOutcome(dto: ClearOutcomeDTO): ClearOutcome {
+  return { removed: dto?.removed ?? 0, failed: dto?.failed ?? [] };
 }
 
 /** 高层客户端：契约命令 + UI 适配（stores 只依赖这一层） */
 class ApiClient {
   private backend: Backend | null = null;
-  private lastSettings: Settings | null = null;
+  /** 最近一次被接受的设置（含服务端 revision），仅作前端缓存与补丁基底 */
+  private lastSettings: AdaptedSettings | null = null;
+  /** 已接受的最大设置修订号；-1 表示尚未建立/已重置 */
+  private lastRevision = -1;
+  /**
+   * 账号网络校验是否可采信（tasks 5.4）：未校验时不拿临时匿名态限制清晰度兜底。
+   * 由启动协调器在 `shell://core-status` 后更新。
+   */
+  private accountTrusted = false;
 
   setBackend(backend: Backend): void {
     this.backend = backend;
+    // 重新建立后端会话时重置本地修订状态（design D3）。
+    this.lastSettings = null;
+    this.lastRevision = -1;
+    this.accountTrusted = false;
+  }
+
+  /** 账号校验阶段变化（ready/degraded 后可采信网络/账号结果） */
+  setAccountTrusted(trusted: boolean): void {
+    this.accountTrusted = trusted;
+  }
+
+  get isAccountTrusted(): boolean {
+    return this.accountTrusted;
+  }
+
+  /** 已接受设置的服务端修订号（测试与调试用） */
+  get settingsRevision(): number {
+    return this.lastRevision;
   }
 
   get isReady(): boolean {
@@ -156,11 +197,12 @@ class ApiClient {
   cancelTask = (taskId: string) => this.b().cancelTask(taskId);
   retryTask = (taskId: string) => this.b().retryTask(taskId);
   removeTask = (taskId: string) => this.b().removeTask(taskId);
+  retryPersistence = () => this.b().retryPersistence();
   pauseAll = () => this.b().pauseAll();
   resumeAll = () => this.b().startAll();
   retryFailed = () => this.b().retryAll();
-  clearCompleted = () => this.b().clearFinished();
-  cancelAllQueued = () => this.b().clearInactive();
+  clearCompleted = async (): Promise<ClearOutcome> => clearOutcome(await this.b().clearFinished());
+  clearInactive = async (): Promise<ClearOutcome> => clearOutcome(await this.b().clearInactive());
 
   // ---- 解析 / 入队 ----
   parseLinks = async (text: string): Promise<ParseResult> => {
@@ -170,30 +212,37 @@ class ApiClient {
       .filter(Boolean);
     const inputs = lines.length > 0 ? lines : [text.trim()];
     const account = await this.getAccount();
+    // 网络校验未完成时账号结果只用于展示，不用它限制清晰度兜底（tasks 5.4）。
+    const accountTrusted = this.accountTrusted || account.signedIn;
     const items: ParseResult['items'] = [];
     const failures: ParseFailure[] = [];
     for (const input of inputs) {
       try {
         const dto = await this.b().parseInput(input);
-        items.push(...parseResultFromDTO(dto, account).items);
+        items.push(...parseResultFromDTO(dto, account, accountTrusted).items);
       } catch (error) {
-        failures.push({ raw: input, reason: errorMessage(error) });
+        failures.push({ raw: input, reason: errorMessageOf(error) });
       }
     }
     return {
       items,
       failures,
-      requiresConfirmation:
-        items.length > 1 ||
-        items.some((item) => item.entries.filter((entry) => entry.selectedByDefault).length > 1),
+      requiresConfirmation: requiresAddConfirmation(items),
     };
   };
 
-  enqueue = async (parse: ParseResult, selection: EnqueueSelection): Promise<string[]> => {
+  /**
+   * 按内容分别入队（design D8/6.4）：一次确认可能拆成多个独立 add_tasks 请求。
+   * 单个请求失败不影响其他内容的结果；返回逐内容成功/失败，供 UI 只重试失败内容。
+   */
+  enqueue = async (parse: ParseResult, selection: EnqueueSelection): Promise<EnqueueOutcome> => {
     const taskIds: string[] = [];
+    const succeededItemIds: string[] = [];
+    const failures: EnqueueFailure[] = [];
     for (const item of parse.items) {
       if (!selection.itemIds.includes(item.id)) continue;
       const selectedIds = selection.entries[item.id];
+      // 明确清空的内容不创建任务，也不回落到默认选择
       if (selectedIds?.length === 0) continue;
       const entryIndexes =
         selectedIds === undefined
@@ -212,33 +261,60 @@ class ApiClient {
         entryIndexes,
         note: selection.note,
       };
-      const result = await this.b().addTasks(item.rawInput ?? item.pageUrl, options);
-      taskIds.push(...result.taskIds);
+      try {
+        const result = await this.b().addTasks(item.rawInput ?? item.pageUrl, options);
+        taskIds.push(...result.taskIds);
+        if (result.taskIds.length > 0 || result.rejected.length === 0) {
+          succeededItemIds.push(item.id);
+        }
+        if (result.rejected.length > 0 && result.taskIds.length === 0) {
+          failures.push({
+            itemId: item.id,
+            title: item.title,
+            message: result.rejected.map((rejected) => rejected.reason).join('；'),
+          });
+        }
+      } catch (error) {
+        failures.push({ itemId: item.id, title: item.title, message: errorMessageOf(error) });
+      }
     }
-    return taskIds;
+    return { taskIds, succeededItemIds, failures };
   };
 
   // ---- 设置 ----
-  getSettings = async (): Promise<Settings> => {
+
+  /** 按修订号接收设置：更旧的响应/事件不得覆盖较新的已接受值（design D3）。 */
+  private acceptSettings(settings: AdaptedSettings): AdaptedSettings {
+    const revision = settingsRevisionOf(settings);
+    if (revision !== undefined && revision < this.lastRevision) {
+      return this.lastSettings ?? settings;
+    }
+    this.lastSettings = settings;
+    if (revision !== undefined && revision > this.lastRevision) {
+      this.lastRevision = revision;
+    }
+    return settings;
+  }
+
+  /**
+   * 事件/启动读取路径：Store 判定接收后再同步 ApiClient 缓存，
+   * 保证 `lastSettings` 与 Store 始终一致。
+   */
+  applySettingsSnapshot(settings: AdaptedSettings): void {
+    this.acceptSettings(settings);
+  }
+
+  getSettings = async (): Promise<AdaptedSettings> => {
     const dto = await this.b().getSettings();
-    this.lastSettings = settingsFromDTO(dto, this.lastSettings);
-    // 前端 UI 偏好（shell Settings 暂不持久化）
-    this.lastSettings.interface.glassBackground = readGlassPref();
-    return this.lastSettings;
+    return this.acceptSettings(settingsFromDTO(dto, this.lastSettings));
   };
 
-  updateSettings = async (
-    patch: SettingsPatch,
-  ): Promise<{ settings: Settings; issues: SettingsValidationIssue[] }> => {
+  /** 增量提交一个设置补丁；后端已按 patch_settings 原子合并并返回新修订号。 */
+  patchSettings = async (patch: SettingsPatch): Promise<AdaptedSettings> => {
     const base = this.lastSettings ?? (await this.getSettings());
-    const merged = mergeSettings(base, patch);
-    const issues = validateSettings(merged);
-    if (issues.length > 0) {
-      return { settings: base, issues };
-    }
-    const saved = settingsFromDTO(await this.b().setSettings(settingsToDTO(merged)), merged);
-    this.lastSettings = saved;
-    return { settings: saved, issues: [] };
+    const dto = settingsPatchToDTO(patch, base);
+    const saved = settingsFromDTO(await this.b().patchSettings(dto), base);
+    return this.acceptSettings(saved);
   };
 
   // ---- 账户 / 登录 ----
@@ -306,6 +382,9 @@ class ApiClient {
       pass: network.proxyPass,
     });
   quitApp = () => this.b().quitApp();
+  forceQuitApp = () => this.b().forceQuitApp();
+  retryInit = () => this.b().retryInit();
+  retryNetwork = () => this.b().retryNetwork();
   requestQuitCheck = () => this.b().requestQuitCheck();
   getAppInfo = () => this.b().getAppInfo();
   getMenuState = () => this.b().getMenuState();

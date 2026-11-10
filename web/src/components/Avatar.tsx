@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Icon } from './Icon';
-import { isRemoteImageUrl, resolveRemoteImage } from '../lib/cover';
+import { isRemoteImageUrl, resolveRemoteImage, retainRemoteImage } from '../lib/cover';
 
 type AvatarStatus = 'loading' | 'ready' | 'error';
 
@@ -47,6 +47,12 @@ export function Avatar({ src, alt = '', className = '', iconSize = 18 }: AvatarP
       cancelled = true;
     };
   }, [src]);
+
+  // 已挂载头像保留缓存条目（tasks 7.6）。
+  useEffect(() => {
+    if (!remote || !resolved || status === 'error') return;
+    return retainRemoteImage(src ?? '');
+  }, [remote, resolved, status, src]);
 
   const showImage = Boolean(resolved) && status !== 'error';
 

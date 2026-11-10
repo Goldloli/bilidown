@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Icon } from './Icon';
 import { isMockMode } from '../lib/capabilities';
-import { resolveCover } from '../lib/cover';
+import { resolveCover, retainRemoteImage } from '../lib/cover';
 
 interface ThumbnailProps {
   src: string | null | undefined;
@@ -47,6 +47,12 @@ export function Thumbnail({ src, alt, className, iconSize = 18 }: ThumbnailProps
       cancelled = true;
     };
   }, [src, needsFetch]);
+
+  // 已挂载图片保留内存缓存条目，淘汰时优先选择离屏且无订阅的图片（tasks 7.6）。
+  useEffect(() => {
+    if (!needsFetch || !resolved || status === 'error') return;
+    return retainRemoteImage(src ?? '');
+  }, [needsFetch, resolved, status, src]);
 
   return (
     <div

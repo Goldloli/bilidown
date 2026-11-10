@@ -32,7 +32,10 @@ CARGO_NET_OFFLINE=true pnpm tauri dev
 | --- | --- | --- |
 | `get_app_info` | — | `AppInfoDTO {productName,version,tauriVersion,os,arch,identifier,dataDir,logDir,ffmpegFound,ffmpegPath,glassSupported,glassUnavailableReason,notificationsSupported,justUpdated}` |
 | `open_preferences` | — | `void`（唯一偏好设置窗口，880×600 overlay） |
-| `quit_app` | — | `void`（`manager.shutdown()` 后优雅退出；前端确认退出时调用） |
+| `quit_app` | — | `void`（先 `prepare_shutdown()` 保存；保存失败 reject `kind=unknown`，由前端提供「重试保存 / 仍然退出」） |
+| `force_quit_app` | — | `void`（用户明确放弃未保存状态后退出，不再要求保存成功） |
+| `retry_init` | — | `void`（本地初始化失败后重试；仅在 core 未就绪时生效） |
+| `retry_network` | — | `void`（本地已就绪时重新尝试设备激活/账号恢复） |
 | `get_diagnostics` | — | `string`（版本/系统/路径/队列/账号摘要） |
 
 ### 解析 / 队列
@@ -43,8 +46,9 @@ CARGO_NET_OFFLINE=true pnpm tauri dev
 | `list_queue` | — | `QueueSnapshotDTO` |
 | `pause_task` / `resume_task` / `cancel_task` / `retry_task` / `remove_task` | `taskId` | `void` |
 | `start_all` / `pause_all` / `retry_all` | — | `number`（受影响任务数） |
-| `clear_finished` | — | `number` |
-| `clear_inactive` | — | `number`（壳实现：排队/暂停/取消逐个 remove） |
+| `clear_finished` | — | `ClearOutcome {removed, failed: string[]}`（失败行保留） |
+| `clear_inactive` | — | `ClearOutcome`（actor 内单批确定排队/暂停/已取消目标，统一补调度） |
+| `retry_persistence` | — | `void`（重试完成事务/历史/任务记录；失败仍保留可重试状态） |
 
 `AddOptionsDTO { quality: string /*"best"/"1080P"/…*/, codec: string /*auto/avc/hevc/av1*/, audioFormat: string /*original/mp3*/, outputDir: string, entryIndexes?: number[], note?: string }`
 
@@ -60,11 +64,13 @@ CARGO_NET_OFFLINE=true pnpm tauri dev
 ### 设置
 | 命令 | 参数 | 返回 |
 | --- | --- | --- |
-| `get_settings` | — | `SettingsDTO` |
-| `set_settings` | `settings: SettingsDTO` | `SettingsDTO`（保存 + 热更新；非法值返回 `kind=parse`） |
+| `get_settings` | — | `SettingsDTO`（含 `revision`） |
+| `set_settings` | `settings: SettingsDTO` | `SettingsDTO`（兼容的完整替换入口；保存 + 热更新；非法值 reject） |
+| `patch_settings` | `patch: SettingsPatchDTO` | `SettingsDTO`（增量提交：省略=保持不变，`null`=清空可空字段；返回新 `revision`） |
 
 `SettingsDTO`：`downloadDir,maxConcurrent,quality,codec,audioFormat,ffmpegPath,proxy{mode,host,port,user,pass},theme,notifications,watchClipboard` +
-扩展 `parseConcurrency,historyLimit,historyClearPolicy,dockBadge,reduceMotion,showSpeedInStatus,writeMetadata,soundOnComplete,revealInFinderOnComplete,keepQueueOnExit,ffmpegDetected,ffmpegVersion`。
+扩展 `parseConcurrency,historyLimit,historyClearPolicy,dockBadge,reduceMotion,showSpeedInStatus,writeMetadata,soundOnComplete,revealInFinderOnComplete,keepQueueOnExit,ffmpegDetected,ffmpegVersion,revision`。
+`SettingsPatchDTO` 字段：`downloadDir,maxConcurrent,quality,codec,audioFormat,ffmpegPath,proxy,theme,notifications,watchClipboard,historyLimit,writeMetadata,downloadSubtitle,downloadCover,checkUpdatesOnStartup,accentColor,motion,qualityFallback,glassBackground`（全部可选）。
 core 未实现的扩展字段由 Rust 回显默认值（parseConcurrency 固定 2、dockBadge 固定 true、soundOnComplete 固定 false 等）。
 
 ### 历史
@@ -119,9 +125,12 @@ core 未实现的扩展字段由 Rust 回显默认值（parseConcurrency 固定 
 | `shell://drag` | `{active:boolean}`（HTML5 拖拽时前端自用；Rust 原生 drop 兜底已因 `dragDropEnabled:false` 不触发） |
 | `shell://drop` | `{paths:string[],text:string}`（单实例唤起携带链接；HTML5 drop 由前端直接处理） |
 | `shell://quit-requested` | `QueueStatsDTO`（前端弹确认框，确认后调 `quit_app`） |
+| `shell://core-status` | `CoreStatusDTO {stage: local-ready\|network-ready\|network-degraded, generation, degraded, error?}`（启动分阶段） |
+| `covers://cleared` | 无 payload（清理封面缓存后前端失效内存图片缓存） |
+| `files://invalidated` | 无 payload（窗口重新激活/文件操作失败后前端刷新列表） |
 
 ### 3.1 TaskDTO 关键字段
-`{id,status,phase,sourceKind,sourceId,title,coverUrl,pageUrl,quality,outputPath,error:AppErrorDTO|null,restored,sortIndex,createdAt,updatedAt,progress,owner?,entries?:string[],entryCount?,codec?,audioFormat?,outputDir?,durationSecs?}`
+`{id,status,phase,sourceKind,sourceId,title,coverUrl,pageUrl,quality,outputPath,error:AppErrorDTO|null,restored,sortIndex,createdAt,updatedAt,progress,owner?,entries?:string[],entryCount?,codec?,audioFormat?,outputDir?,durationSecs?,extras,persistError?}`
 
 - `status` = core `TaskPhase`（queued/resolving/downloading/merging/paused/done/failed/cancelled）
 - `phase` = 渲染阶段（`resolve/video/merge/postprocess`，由 core `progress.stage` 映射）
@@ -378,3 +387,20 @@ interface ExportOpusDTO { path: string; images: number; skipped: number }
 SettingsDTO 新增字段（旧配置缺省兼容）：
 - `accentColor?: string`（`#RRGGBB`，缺省 = `#FB7299`；空字符串 = 恢复默认）
 - `motion?: "system" | "reduce" | "normal"`（默认 `system`）
+
+## 11. 可靠性与启动分阶段（change improve-client-reliability-and-performance）
+
+- **启动分阶段（D5）**：本地阶段（路径/存储/凭据/设置/队列恢复）先就绪并发出
+  `shell://core-status stage=local-ready`；网络阶段在 5 秒预算内完成 `activate_buvid` 与账号恢复，
+  成功发 `network-ready`、超时发 `network-degraded`（本地内容继续可用，后台自动重试，代次保护旧结果）。
+  传输调度在网络阶段结束后才启用；本地失败可用 `retry_init` 重试，网络失败可用 `retry_network`。
+- **退出保护（D8/3.9）**：`quit_app` 先保存；失败时返回错误且不退出，前端提供「重试保存」与
+  「仍然退出」（`force_quit_app`）；正常保存不增加额外确认步骤。
+- **持久化失败可见（D8/3.8）**：`TaskDTO.persistError` 非空表示记录保存失败，前端展示错误并提供
+  「重试保存」（`retry_persistence`）；重试只写记录，不清除已发布产物、不重新下载。
+- **设置提交（D3）**：`patch_settings` 为唯一增量入口，返回 `SettingsDTO.revision`；
+  `settings://changed` 事件同样携带 `revision`，前端按修订号丢弃乱序响应。
+- **文件操作（D9/3.3）**：`open_file`/`reveal_path`/`reveal_output` 在操作前权威校验文件存在，
+  缺失时 reject `kind=file-missing`（`actions=[retry-download]`）；多产物任务优先定位首个主产物。
+- **清理（D2）**：`clear_inactive` 在 actor 内单批确定排队/暂停/已取消目标并统一补调度；
+  返回 `{removed,failed}`，部分失败行保留并提示。

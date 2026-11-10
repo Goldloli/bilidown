@@ -172,7 +172,12 @@ pub(crate) fn read_outline(hwnd: HWND) -> io::Result<Option<Outline>> {
     let fills_monitor = same_rect(&bounds, &info.rcMonitor, tolerance);
     let square = unsafe { IsZoomed(hwnd) } != 0
         || fills_monitor
-        || is_tiled(&bounds, &info.rcWork, &placement.rcNormalPosition, tolerance);
+        || is_tiled(
+            &bounds,
+            &info.rcWork,
+            &placement.rcNormalPosition,
+            tolerance,
+        );
     Ok(Some(Outline {
         width,
         height,
@@ -210,10 +215,10 @@ fn is_tiled(bounds: &RECT, work: &RECT, normal: &RECT, tolerance: i32) -> bool {
     if restored_size {
         return false;
     }
-    let touches_horizontal_edge = near(bounds.left, work.left, tolerance)
-        || near(bounds.right, work.right, tolerance);
-    let touches_vertical_edge = near(bounds.top, work.top, tolerance)
-        || near(bounds.bottom, work.bottom, tolerance);
+    let touches_horizontal_edge =
+        near(bounds.left, work.left, tolerance) || near(bounds.right, work.right, tolerance);
+    let touches_vertical_edge =
+        near(bounds.top, work.top, tolerance) || near(bounds.bottom, work.bottom, tolerance);
     let within_work_area = bounds.left >= work.left - tolerance
         && bounds.top >= work.top - tolerance
         && bounds.right <= work.right + tolerance
@@ -271,7 +276,11 @@ fn set_dwm<T>(hwnd: HWND, attribute: u32, value: &T) -> io::Result<()> {
 }
 
 fn disable_dwm_rounding(hwnd: HWND) {
-    if let Err(err) = set_dwm(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, &DWMWCP_DONOTROUND) {
+    if let Err(err) = set_dwm(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+        &DWMWCP_DONOTROUND,
+    ) {
         tracing::debug!(target: "shell::window", reason = %err, "系统未提供 DWM 圆角开关，使用区域裁剪");
     }
 }

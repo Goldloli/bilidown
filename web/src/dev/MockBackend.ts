@@ -4,6 +4,7 @@ import type {
   AddOptionsDTO,
   AddTasksResultDTO,
   AppInfoDTO,
+  ClearOutcomeDTO,
   ContractLoginStatus,
   HistoryEntryDTO,
   HistoryFilterDTO,
@@ -13,6 +14,7 @@ import type {
   ParseResultDTO,
   QueueSnapshotDTO,
   SettingsDTO,
+  SettingsPatchDTO,
   TaskEventDTO,
 } from '../lib/contract';
 import type { Backend, ScenarioBootstrap } from '../lib/ipc';
@@ -46,9 +48,35 @@ export class MockBackend implements Backend {
   private parseCache = new Map<string, ParseResultDTO>();
   private loginStatus: ContractLoginStatus = 'waiting';
   private revision = 0;
+  /** 设置修订号（design D3）：get/patch 响应与 settings://changed 事件一致携带 */
+  private settingsRevision = 0;
+  /** dev QA：?settingsFail=N 让前 N 次保存失败，用于验证保存失败/重试界面 */
+  private settingsPatchFailures = 0;
   private scenario = devParams().scenario;
+  private quitAttempts = 0;
+  /**
+   * dev QA 启动模拟（?startup=...）：默认正常分阶段；可模拟本地初始化失败、
+   * 网络阶段挂起、历史读取失败与外部文件失效（tasks 5.1/5.3/7.2）。
+   */
+  private startupMode: string | null;
+  private coreReady: Promise<void> = Promise.resolve();
+  private resolveCore: (() => void) | null = null;
+  private rejectCore: ((error: unknown) => void) | null = null;
+  private localReady = false;
+  private networkReady = false;
+  private networkGeneration = 0;
+  private historyFailures = 0;
+  private startupAttempts = 0;
+  private filesInvalidatedEmitted = false;
 
   constructor() {
+    this.settingsPatchFailures = Math.max(
+      0,
+      Number.parseInt(
+        new URLSearchParams(window.location.search).get('settingsFail') ?? '0',
+        10,
+      ) || 0,
+    );
     this.tasks = this.seedTasks();
     this.account = this.seedAccount();
     this.settings = defaultSettings(devParams().theme);
@@ -67,6 +95,124 @@ export class MockBackend implements Backend {
     if (this.scenario === 'login-expired') this.loginStatus = 'expired';
     if (this.scenario === 'login-failed') this.loginStatus = 'error';
     if (this.scenario === 'login-success') this.loginStatus = 'success';
+    this.startupMode = new URLSearchParams(window.location.search).get('startup');
+    // 首次启动读取与打开历史列表的自动刷新各失败一次，便于演示错误与手动重试。
+    if (this.startupMode === 'history-fail') this.historyFailures = 2;
+    this.resetCoreGate();
+    this.scheduleStartup();
+  }
+
+  // ---- 启动分阶段模拟（tasks 5.1/5.3/5.4）----
+  private resetCoreGate(): void {
+    this.coreReady = new Promise<void>((resolve, reject) => {
+      this.resolveCore = resolve;
+      this.rejectCore = reject;
+    });
+  }
+
+  /** core 依赖命令在本地阶段完成前等待（与 Rust `ShellState::core()` 一致）。 */
+  private awaitCore(): Promise<void> {
+    return this.coreReady;
+  }
+
+  private scheduleStartup(): void {
+    if (this.startupMode === 'core-fail' && this.startupAttempts === 0) {
+      // 用宏任务而非微任务：给启动器留出安装事件订阅的时间（与 Rust 异步初始化时序一致）。
+      window.setTimeout(() => {
+        this.rejectCore?.({
+          kind: 'unknown',
+          message: '引擎初始化失败：数据库迁移失败（dev 注入）',
+        });
+        this.emitNotice('error', '引擎初始化失败：数据库迁移失败（dev 注入）');
+      });
+      return;
+    }
+    window.setTimeout(() => this.completeLocalPhase(), 0);
+  }
+
+  private completeLocalPhase(): void {
+    if (this.localReady) return;
+    this.localReady = true;
+    this.resolveCore?.();
+    this.resolveCore = null;
+    this.rejectCore = null;
+    // 与 Rust 本地阶段一致：先发布本地数据事件，再发布 local-ready。
+    // 账号按未校验的本地匿名态发布，不虚报已登录（design D5/tasks 5.4）。
+    this.emitSnapshot();
+    this.emit(CONTRACT_EVENTS.accountChanged, A.accountToDTO(this.visibleAccount()));
+    this.emitSettings();
+    // 历史读取失败模拟：本地阶段也没有可发布的成功历史（不伪造空列表为成功）。
+    if (this.historyFailures === 0) this.emitHistory();
+    this.emit(CONTRACT_EVENTS.coreStatus, {
+      stage: 'local-ready',
+      generation: this.networkGeneration,
+      degraded: false,
+    });
+    if (this.startupMode === 'network-hang') return;
+    window.setTimeout(() => this.completeNetworkPhase(), 0);
+  }
+
+  private completeNetworkPhase(): void {
+    if (this.networkReady) return;
+    this.networkGeneration += 1;
+    if (this.startupMode === 'network-degraded') {
+      // 首次网络准备超时：本地可用、账号校验未完成，可点击重试（tasks 5.4）。
+      this.emit(CONTRACT_EVENTS.coreStatus, {
+        stage: 'network-degraded',
+        generation: this.networkGeneration,
+        degraded: true,
+        error: '网络准备超时，本地内容可继续使用（dev 注入）',
+      });
+      return;
+    }
+    this.networkReady = true;
+    this.emitAccount();
+    this.emit(CONTRACT_EVENTS.coreStatus, {
+      stage: 'network-ready',
+      generation: this.networkGeneration,
+      degraded: false,
+    });
+    this.scheduleFilesInvalidated();
+  }
+
+  private scheduleFilesInvalidated(): void {
+    if (this.startupMode !== 'files-invalidated' || this.filesInvalidatedEmitted) return;
+    this.filesInvalidatedEmitted = true;
+    window.setTimeout(() => {
+      const done = this.tasks.find((task) => task.status === 'completed');
+      if (done) {
+        if (done.artifacts?.length) {
+          done.artifacts = done.artifacts.map((artifact) =>
+            artifact.entryIndex === 0
+              ? { ...artifact, exists: false, sizeMatches: false, valid: false }
+              : artifact,
+          );
+        } else {
+          done.artifacts = [
+            {
+              path: done.outputPath ?? '~/Downloads/bilidown/已删除.mp4',
+              size: done.progress.totalBytes,
+              entryIndex: 0,
+              entryTitle: null,
+              kind: 'media',
+              exists: false,
+              sizeMatches: false,
+              valid: false,
+            },
+          ];
+        }
+      }
+      const entry = this.history[0];
+      if (entry) entry.fileExists = false;
+      this.emit(CONTRACT_EVENTS.filesInvalidated, undefined);
+      this.emitSnapshot();
+      this.emitHistory();
+    }, 600);
+  }
+
+  /** 网络阶段未完成的本地视图：账号按未校验匿名态处理，不虚报登录成功。 */
+  private visibleAccount(): AccountState {
+    return this.networkReady ? this.account : { ...ANONYMOUS_ACCOUNT };
   }
 
   private seedTasks(): QueueTask[] {
@@ -113,6 +259,18 @@ export class MockBackend implements Backend {
       }
       case 'errors':
         return errorTasks();
+      case 'persist-error': {
+        const tasks = queueTasks();
+        const downloading = tasks.find((task) => task.id === 'task-dl');
+        if (downloading) {
+          downloading.persistError = '任务记录保存失败：database is locked';
+        }
+        const done = tasks.find((task) => task.id === 'task-done');
+        if (done) {
+          done.persistError = '历史记录写入失败：disk I/O error';
+        }
+        return tasks;
+      }
       default:
         return queueTasks();
     }
@@ -185,7 +343,7 @@ export class MockBackend implements Backend {
 
   private snapshotDTO(): QueueSnapshotDTO {
     this.revision += 1;
-    return A.snapshotToDTO(this.tasks, this.account, this.revision);
+    return A.snapshotToDTO(this.tasks, this.visibleAccount(), this.revision);
   }
 
   private emitSnapshot(): void {
@@ -209,8 +367,12 @@ export class MockBackend implements Backend {
     this.emit(CONTRACT_EVENTS.accountChanged, A.accountToDTO(this.account));
   }
 
+  private settingsDTO(): SettingsDTO {
+    return A.settingsToDTO(this.settings, this.settingsRevision);
+  }
+
   private emitSettings(): void {
-    this.emit(CONTRACT_EVENTS.settingsChanged, A.settingsToDTO(this.settings));
+    this.emit(CONTRACT_EVENTS.settingsChanged, this.settingsDTO());
   }
 
   private emitHistory(): void {
@@ -291,7 +453,30 @@ export class MockBackend implements Backend {
     window.location.hash = '#/preferences';
   };
 
-  quitApp = async (): Promise<void> => {};
+  quitApp = async (): Promise<void> => {
+    // 开发场景演示「退出前保存失败」：第一次失败，重试后成功（真实后端由 shell 决定）
+    if (this.scenario === 'quit-failure' && this.quitAttempts === 0) {
+      this.quitAttempts += 1;
+      throw { kind: 'disk', message: '任务状态保存失败：database is locked', actions: ['retry'] };
+    }
+  };
+
+  forceQuitApp = async (): Promise<void> => {};
+
+  retryInit = async (): Promise<void> => {
+    if (this.localReady) return;
+    this.startupAttempts += 1;
+    this.resetCoreGate();
+    this.scheduleStartup();
+  };
+
+  retryNetwork = async (): Promise<void> => {
+    await this.awaitCore();
+    if (this.startupMode === 'network-hang' || this.startupMode === 'network-degraded') {
+      this.startupMode = '';
+    }
+    this.completeNetworkPhase();
+  };
 
   getDiagnostics = async (): Promise<string> =>
     `bilidown 2.0.0 (mock)\nmacOS 27.0.1 arm64\n队列：${this.tasks.length} 项\n最近错误：登录已失效`;
@@ -311,6 +496,26 @@ export class MockBackend implements Backend {
     ) {
       const item = addPanelParseResult().items[0];
       const dto = { ...A.parseResultToDTO(item), rawInput: trimmed };
+      this.parseCache.set(trimmed, dto);
+      return dto;
+    }
+    if (this.scenario === 'add-multi-p') {
+      // 多 P/番剧：实际 12 个条目，但默认只勾选当前集（第 1 集）
+      const dto: ParseResultDTO = {
+        kind: 'bangumi',
+        sourceId: 'ss-multi-p',
+        title: '《孤独摇滚！》全 12 话',
+        coverUrl: '/covers/cover-02.svg',
+        pageUrl: trimmed.startsWith('http') ? trimmed : 'https://www.bilibili.com/bangumi/play/ss41410',
+        owner: '孤独摇滚制作委员会',
+        rawInput: trimmed,
+        entries: Array.from({ length: 12 }, (_, index) => ({
+          index,
+          title: `第 ${String(index + 1).padStart(2, '0')} 话`,
+          durationSecs: 1420,
+          selectedDefault: index === 0,
+        })),
+      };
       this.parseCache.set(trimmed, dto);
       return dto;
     }
@@ -391,7 +596,10 @@ export class MockBackend implements Backend {
     return { taskIds, rejected: [] };
   };
 
-  listQueue = async (): Promise<QueueSnapshotDTO> => this.snapshotDTO();
+  listQueue = async (): Promise<QueueSnapshotDTO> => {
+    await this.awaitCore();
+    return this.snapshotDTO();
+  };
 
   pauseTask = async (taskId: string): Promise<void> => {
     this.updateTask(
@@ -506,25 +714,39 @@ export class MockBackend implements Backend {
     return count;
   };
 
-  clearFinished = async (): Promise<number> => {
+  clearFinished = async (): Promise<ClearOutcomeDTO> => {
     const removed = this.tasks.filter((task) => task.status === 'completed').map((task) => task.id);
     this.tasks = this.tasks.filter((task) => task.status !== 'completed');
     this.emitSnapshot();
     for (const id of removed) this.emitTaskEvent(id, 'removed');
-    return removed.length;
+    return { removed: removed.length, failed: [] };
   };
 
-  clearInactive = async (): Promise<number> => {
+  clearInactive = async (): Promise<ClearOutcomeDTO> => {
     const inactive: TaskStatus[] = ['queued', 'paused', 'cancelled'];
     const removed = this.tasks.filter((task) => inactive.includes(task.status)).map((task) => task.id);
     this.tasks = this.tasks.filter((task) => !inactive.includes(task.status));
     this.emitSnapshot();
     for (const id of removed) this.emitTaskEvent(id, 'removed');
-    return removed.length;
+    return { removed: removed.length, failed: [] };
+  };
+
+  retryPersistence = async (): Promise<void> => {
+    let cleared = 0;
+    for (const task of this.tasks) {
+      if (task.persistError) {
+        task.persistError = null;
+        cleared += 1;
+      }
+    }
+    if (cleared > 0) this.emitSnapshot();
   };
 
   // ---- 账户 / 登录 ----
-  getAccount = async (): Promise<AccountInfoDTO | null> => A.accountToDTO(this.account);
+  getAccount = async (): Promise<AccountInfoDTO | null> => {
+    await this.awaitCore();
+    return A.accountToDTO(this.visibleAccount());
+  };
 
   loginStart = async (): Promise<LoginStartDTO> => {
     const state =
@@ -579,16 +801,41 @@ export class MockBackend implements Backend {
   };
 
   // ---- 设置 ----
-  getSettings = async (): Promise<SettingsDTO> => A.settingsToDTO(this.settings);
+  getSettings = async (): Promise<SettingsDTO> => {
+    await this.awaitCore();
+    return this.settingsDTO();
+  };
 
   setSettings = async (settings: SettingsDTO): Promise<SettingsDTO> => {
     this.settings = A.settingsFromDTO(settings, this.settings);
+    this.settingsRevision += 1;
     this.emitSettings();
-    return A.settingsToDTO(this.settings);
+    return this.settingsDTO();
+  };
+
+  /** 增量提交（design D3）：省略字段保持不变、null 清空可空字段；Mock 与 Rust 同语义。 */
+  patchSettings = async (patch: SettingsPatchDTO): Promise<SettingsDTO> => {
+    if (this.settingsPatchFailures > 0) {
+      this.settingsPatchFailures -= 1;
+      throw {
+        kind: 'disk',
+        message: '设置保存失败：无法写入设置文件（dev 注入）',
+        actions: ['retry'],
+      };
+    }
+    this.settings = A.applySettingsPatchDTO(this.settings, patch);
+    this.settingsRevision += 1;
+    this.emitSettings();
+    return this.settingsDTO();
   };
 
   // ---- 历史 ----
   listHistory = async (filter?: HistoryFilterDTO): Promise<HistoryEntryDTO[]> => {
+    await this.awaitCore();
+    if (this.historyFailures > 0) {
+      this.historyFailures -= 1;
+      throw { kind: 'disk', message: '历史记录读取失败：database is locked（dev 注入）' };
+    }
     let items = [...this.history];
     if (filter?.status) items = items.filter((entry) => entry.status === filter.status);
     if (filter?.keyword?.trim()) {
@@ -694,6 +941,10 @@ export class MockBackend implements Backend {
       case 'add-link':
         base.panel = 'add-link';
         break;
+      case 'add-multi-p':
+        // 默认只勾选当前集的多条目内容：解析后仍应进入确认面板（design D6/6.2）
+        base.panel = 'add-link';
+        break;
       case 'add-panel':
       case 'add-panel-preferences':
       case 'add-panel-no-fallback':
@@ -727,6 +978,11 @@ export class MockBackend implements Backend {
           message: '登录已失效，请重新扫码后重试',
           actionLabel: '重新登录',
         });
+        break;
+      case 'quit-failure':
+        // 场景直接展示「保存失败」对话框；把首次失败记为已发生，重试保存即可成功演示
+        this.quitAttempts = 1;
+        base.quitFailure = '任务状态保存失败：database is locked';
         break;
       default:
         break;

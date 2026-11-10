@@ -9,9 +9,9 @@ use crate::dto::{MenuActionDTO, MenuStateDTO};
 use crate::events;
 use crate::state::{MenuCounts, ShellState};
 use std::collections::BTreeMap;
-use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder, MenuItemKind, SubmenuBuilder};
 #[cfg(target_os = "macos")]
 use tauri::menu::AboutMetadata;
+use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder, MenuItemKind, SubmenuBuilder};
 use tauri::{AppHandle, Manager, Wry};
 
 /// 单项动作 id（快捷键在文件菜单上声明；控制菜单复用同一动作但不带快捷键）。
@@ -245,10 +245,21 @@ pub fn dispatch(app: &AppHandle, raw_id: &str) {
             return;
         }
         tracing::info!(target: "shell::menu", action, raw = raw_id, "菜单动作 → 前端");
-        let payload = MenuActionDTO { id: action.to_string(), label: None };
+        let payload = MenuActionDTO {
+            id: action.to_string(),
+            label: None,
+        };
         #[cfg(target_os = "windows")]
         {
-            if matches!(action, "open-link" | "clipboard-add" | "clear-finished" | "clear-inactive" | "login" | "logout") {
+            if matches!(
+                action,
+                "open-link"
+                    | "clipboard-add"
+                    | "clear-finished"
+                    | "clear-inactive"
+                    | "login"
+                    | "logout"
+            ) {
                 crate::window::show_main(app);
             }
             // 所有窗口都会订阅 shell://menu，只向主窗口发送，避免设置窗口重复执行。
@@ -258,11 +269,7 @@ pub fn dispatch(app: &AppHandle, raw_id: &str) {
             }
         }
         #[cfg(not(target_os = "windows"))]
-        events::emit(
-            app,
-            events::SHELL_MENU,
-            payload,
-        );
+        events::emit(app, events::SHELL_MENU, payload);
     } else {
         tracing::warn!(target: "shell::menu", raw = raw_id, "未映射的菜单 id");
     }
@@ -380,7 +387,13 @@ mod tests {
     #[test]
     fn empty_queue_blocks_hidden_menu_accelerators() {
         let counts = MenuCounts::default();
-        for action in ["start-all", "pause-all", "retry-all", "clear-finished", "clear-inactive"] {
+        for action in [
+            "start-all",
+            "pause-all",
+            "retry-all",
+            "clear-finished",
+            "clear-inactive",
+        ] {
             assert!(!action_enabled(action, &counts, false), "{action}");
         }
         for action in ["open-link", "clipboard-add", "preferences", "quit"] {
@@ -390,13 +403,24 @@ mod tests {
 
     #[test]
     fn menu_actions_follow_current_queue_and_account_state() {
-        let counts = MenuCounts { paused: 1, failed: 1, ..Default::default() };
+        let counts = MenuCounts {
+            paused: 1,
+            failed: 1,
+            ..Default::default()
+        };
         assert!(action_enabled("start-all", &counts, false));
         assert!(action_enabled("retry-all", &counts, false));
         assert!(action_enabled("clear-finished", &counts, false));
         assert!(action_enabled("clear-inactive", &counts, false));
         assert!(!action_enabled("pause-all", &counts, false));
-        assert!(action_enabled("pause-all", &MenuCounts { active: 1, ..Default::default() }, false));
+        assert!(action_enabled(
+            "pause-all",
+            &MenuCounts {
+                active: 1,
+                ..Default::default()
+            },
+            false
+        ));
         assert!(action_enabled("login", &counts, false));
         assert!(!action_enabled("logout", &counts, false));
         assert!(!action_enabled("login", &counts, true));

@@ -1,8 +1,68 @@
 import { useEffect, useState } from 'react';
+import { Skeleton } from './components/Skeleton';
+import { useAsyncComponent } from './lib/asyncComponent';
+import { retryStartupSection } from './lib/bootstrap';
 import { devParams } from './dev/scenario';
-import { GalleryApp } from './dev/GalleryApp';
+import { TrafficLights } from './shell/TrafficLights';
+import { WindowControls } from './shell/WindowControls';
+import { useSettingsStore } from './stores/useSettingsStore';
+import { useStartupStore } from './stores/useStartupStore';
 import { MainWindow } from './shell/MainWindow';
-import { PreferencesApp } from './settings/PreferencesApp';
+
+/** 页面加载态：沿用主窗口骨架风格，不出现空白框架（tasks 8.1/8.2）。 */
+function PageLoading({ label }: { label: string }) {
+  const params = devParams();
+  return (
+    <div className="flex h-full flex-col" style={{ background: 'var(--bg-window)' }}>
+      {/* 加载骨架也保留窗口控制，避免等待网络/模块时窗口无法操作（tasks 5.1）。 */}
+      <header
+        data-tauri-drag-region
+        className="drag-region titlebar relative flex shrink-0 items-center gap-1.5 px-4"
+        style={{ height: 'var(--titlebar-h)' }}
+      >
+        {params.mock && params.os !== 'windows' && <TrafficLights />}
+        <Skeleton className="h-3 w-24" />
+        <div className="ml-auto flex items-center gap-1.5">
+          <WindowControls />
+        </div>
+      </header>
+      <main className="min-h-0 flex-1 px-4 pt-2" style={{ background: 'var(--bg-content)' }}>
+        <p className="mb-3 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+          {label}
+        </p>
+        <div className="space-y-2">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Skeleton key={index} className="h-10 w-full" />
+          ))}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+/** 页面加载失败：可读错误 + 重试（tasks 8.2）。 */
+function PageError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div
+      className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center"
+      style={{ background: 'var(--bg-window)', color: 'var(--text-primary)' }}
+    >
+      <p className="text-[13px]">页面加载失败：{message}</p>
+      <button
+        type="button"
+        className="rounded-md px-3 py-1 text-[12px]"
+        style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
+        onClick={onRetry}
+      >
+        重新加载
+      </button>
+    </div>
+  );
+}
+
+const loadPreferences = () =>
+  import('./settings/PreferencesApp').then((module) => module.PreferencesApp);
+const loadGallery = () => import('./dev/GalleryApp').then((module) => module.GalleryApp);
 
 function useHashRoute(): 'main' | 'preferences' | 'gallery' {
   const [hash, setHash] = useState(() => window.location.hash);
@@ -18,9 +78,50 @@ function useHashRoute(): 'main' | 'preferences' | 'gallery' {
 
 export function App() {
   const route = useHashRoute();
-  // 保证 devParams 在首次渲染前已缓存（截图/场景需要）
-  void devParams();
-  if (route === 'preferences') return <PreferencesApp />;
-  if (route === 'gallery') return <GalleryApp />;
+  const preferences = useAsyncComponent(loadPreferences, route === 'preferences');
+  const gallery = useAsyncComponent(loadGallery, route === 'gallery');
+  const settings = useSettingsStore((s) => s.settings);
+  const settingsSection = useStartupStore((s) => s.sections.settings);
+
+  // 主窗口就绪后一次性预加载常用设置页面代码，避免首次打开设置时白屏（tasks 8.1）。
+  useEffect(() => {
+    if (route !== 'main') return;
+    const preload = () => {
+      void loadPreferences();
+    };
+    if (typeof window.requestIdleCallback === 'function') {
+      const handle = window.requestIdleCallback(preload, { timeout: 3000 });
+      return () => window.cancelIdleCallback?.(handle);
+    }
+    const timer = window.setTimeout(preload, 1200);
+    return () => window.clearTimeout(timer);
+  }, [route]);
+
+  if (route === 'preferences') {
+    // 设置窗口先渲染骨架；顶部设置独立加载，失败时局部重试（tasks 5.1/5.3）。
+    if (!settings) {
+      if (settingsSection.status === 'error') {
+        return (
+          <PageError
+            message={settingsSection.error ?? '设置加载失败'}
+            onRetry={() => void retryStartupSection('settings')}
+          />
+        );
+      }
+      return <PageLoading label="正在加载偏好设置…" />;
+    }
+    if (preferences.error) {
+      return <PageError message={preferences.error} onRetry={preferences.retry} />;
+    }
+    const Page = preferences.Page;
+    return Page ? <Page /> : <PageLoading label="正在加载偏好设置…" />;
+  }
+  if (route === 'gallery') {
+    if (gallery.error) {
+      return <PageError message={gallery.error} onRetry={gallery.retry} />;
+    }
+    const Page = gallery.Page;
+    return Page ? <Page /> : <PageLoading label="正在加载开发画廊…" />;
+  }
   return <MainWindow />;
 }

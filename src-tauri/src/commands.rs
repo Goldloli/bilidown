@@ -6,9 +6,9 @@ use bilidown_core::api::account::{self, AccountState};
 use bilidown_core::api::types::{BiliId, Content, PlayUrl, TaskSpec};
 use bilidown_core::api::{audio, parse, video};
 use bilidown_core::media::ffmpeg::Ffmpeg;
-use bilidown_core::storage::{HistoryQuery, Settings};
-use bilidown_core::{BiliError, HistoryRecord, QueueSnapshot, TaskPhase};
-use std::path::PathBuf;
+use bilidown_core::storage::HistoryQuery;
+use bilidown_core::{BiliError, HistoryRecord, QueueSnapshot};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
@@ -89,7 +89,12 @@ fn history_entries(core: &Core, query: &HistoryQuery) -> CommandResult<Vec<Histo
         .db()
         .list_history(query)
         .map_err(AppErrorDTO::from)?;
-    Ok(rows.into_iter().map(history_dto).collect())
+    // 一次历史查询内共享文件状态探测，并命中跨批次展示缓存（design D10/7.1、D9/7.2）。
+    let mut probe = FileProbe::with_cache(std::sync::Arc::clone(&core.file_status));
+    Ok(rows
+        .into_iter()
+        .map(|row| history_dto_with_probe(row, &mut probe))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -198,17 +203,52 @@ pub async fn open_preferences(app: AppHandle) -> CommandResult<()> {
     Ok(())
 }
 
+/// 主动退出：先保存（可重试），保存失败时返回错误、不退出，由前端提供「重试保存 / 仍然退出」。
 #[tauri::command]
 pub async fn quit_app(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    if let Some(core) = state.try_core() {
+        tracing::info!(target: "shell::app", "退出：保存任务状态");
+        core.manager
+            .prepare_shutdown()
+            .await
+            .map_err(AppErrorDTO::from)?;
+    }
     state.confirm_quit();
     if let Some(core) = state.try_core() {
-        tracing::info!(target: "shell::app", "退出：shutdown TaskManager");
-        if let Err(err) = core.manager.shutdown().await {
-            tracing::warn!(target: "shell::app", error = %err.describe(), "shutdown 失败");
-        }
+        let _ = core.manager.finalize_shutdown().await;
     }
     tracing::info!(target: "shell::app", "用户确认退出");
     app.exit(0);
+    Ok(())
+}
+
+/// 「仍然退出」：用户明确放弃未保存状态后强制退出，不再要求保存成功。
+#[tauri::command]
+pub async fn force_quit_app(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    state.confirm_quit();
+    if let Some(core) = state.try_core() {
+        let _ = core.manager.finalize_shutdown().await;
+    }
+    tracing::warn!(target: "shell::app", "用户选择放弃未保存状态并退出");
+    app.exit(0);
+    Ok(())
+}
+
+/// 本地初始化失败后重试（design D5/5.4）：仅在 core 尚未就绪时重新拉起初始化。
+#[tauri::command]
+pub async fn retry_init(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    if state.try_core().is_some() {
+        return Ok(());
+    }
+    state::spawn_init(app);
+    Ok(())
+}
+
+/// 网络阶段重试（design D5/5.2/5.4）：本地已就绪时重新尝试设备激活与账号恢复。
+#[tauri::command]
+pub async fn retry_network(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    let core = core_of(&state).await?;
+    state::spawn_network_phase(app, core);
     Ok(())
 }
 
@@ -345,6 +385,7 @@ pub async fn list_queue(state: State<'_, ShellState>) -> CommandResult<QueueSnap
         &snapshot_of(&core),
         &core.account(),
         &core.settings(),
+        Some(&core.file_status),
     ))
 }
 
@@ -399,7 +440,9 @@ pub async fn remove_task(state: State<'_, ShellState>, task_id: String) -> Comma
 }
 
 #[tauri::command]
-pub async fn clear_finished(state: State<'_, ShellState>) -> CommandResult<usize> {
+pub async fn clear_finished(
+    state: State<'_, ShellState>,
+) -> CommandResult<bilidown_core::task::ClearOutcome> {
     core_of(&state)
         .await?
         .manager
@@ -408,22 +451,28 @@ pub async fn clear_finished(state: State<'_, ShellState>) -> CommandResult<usize
         .map_err(AppErrorDTO::from)
 }
 
-/// 清空「未激活」任务（core 无该命令）：排队/暂停/取消逐个 remove。
+/// 清空「未激活」任务：actor 内单批确定目标并统一补调度（design D2/3.5）。
 #[tauri::command]
-pub async fn clear_inactive(state: State<'_, ShellState>) -> CommandResult<usize> {
-    let core = core_of(&state).await?;
-    let snapshot = snapshot_of(&core);
-    let mut removed = 0usize;
-    for task in snapshot.tasks {
-        if matches!(
-            task.phase,
-            TaskPhase::Queued | TaskPhase::Paused | TaskPhase::Cancelled
-        ) && core.manager.remove(&task.id).await.is_ok()
-        {
-            removed += 1;
-        }
-    }
-    Ok(removed)
+pub async fn clear_inactive(
+    state: State<'_, ShellState>,
+) -> CommandResult<bilidown_core::task::ClearOutcome> {
+    core_of(&state)
+        .await?
+        .manager
+        .clear_inactive()
+        .await
+        .map_err(AppErrorDTO::from)
+}
+
+/// 重试所有待保存动作（完成事务/历史/任务记录），返回可读错误（design D8/3.8）。
+#[tauri::command]
+pub async fn retry_persistence(state: State<'_, ShellState>) -> CommandResult<()> {
+    core_of(&state)
+        .await?
+        .manager
+        .retry_persistence()
+        .await
+        .map_err(AppErrorDTO::from)
 }
 
 #[tauri::command]
@@ -566,7 +615,10 @@ pub async fn refresh_account(
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, ShellState>) -> CommandResult<SettingsDTO> {
-    Ok(settings_dto(&core_of(&state).await?.settings()))
+    let core = core_of(&state).await?;
+    let mut settings = settings_dto(&core.settings());
+    settings.revision = Some(core.settings_revision());
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -576,47 +628,41 @@ pub async fn set_settings(
     settings: SettingsDTO,
 ) -> CommandResult<SettingsDTO> {
     let core = core_of(&state).await?;
-    let previous: Settings = core.settings();
+    // 兼容入口：完整替换仍走同一提交协调器（design D3）。
+    let previous = core.settings();
     let applied = settings_from_dto(&settings, &previous);
-    if let Err(errors) = applied.validate() {
-        tracing::warn!(target: "shell::settings", ?errors, "设置校验失败");
-        return Err(AppErrorDTO {
-            kind: "parse".into(),
-            message: errors
-                .iter()
-                .map(|error| format!("{}: {}", error.field, error.message))
-                .collect::<Vec<_>>()
-                .join("; "),
-            actions: vec!["open-settings".into()],
-        });
-    }
-    core.storage
-        .save_settings(&applied)
-        .map_err(AppErrorDTO::from)?;
-    // 代理变化：重建 BiliClient（cookie 从凭据文件迁移）
-    if previous.proxy != applied.proxy {
-        let creds = core.storage.load_credentials();
-        let client = Arc::new(
-            bilidown_core::BiliClient::new(applied.proxy.as_deref(), creds.stored())
-                .map_err(AppErrorDTO::from)?,
-        );
-        client.apply_device(&creds.device);
-        client.activate_buvid().await;
-        core.manager
-            .set_client(client.clone())
-            .await
-            .map_err(AppErrorDTO::from)?;
-        core.set_client(client);
-        tracing::info!(target: "shell::settings", "代理变化，已重建 HTTP client");
-    }
-    core.manager
-        .set_settings(applied.clone())
+    let revision = core
+        .update_settings(|_| Ok(applied.clone()))
         .await
         .map_err(AppErrorDTO::from)?;
-    core.set_settings(applied.clone());
     state::publish_settings(&app, &core);
-    tracing::info!(target: "shell::settings", max_concurrent = applied.max_concurrent, "设置已保存并热更新");
-    Ok(settings_dto(&applied))
+    tracing::info!(
+        target: "shell::settings",
+        revision,
+        max_concurrent = applied.max_concurrent,
+        "设置已保存并热更新"
+    );
+    let mut dto = settings_dto(&applied);
+    dto.revision = Some(revision);
+    Ok(dto)
+}
+
+/// 增量提交设置（design D3）：省略字段保持不变、null 清空可空字段；返回新修订号。
+#[tauri::command]
+pub async fn patch_settings(
+    app: AppHandle,
+    state: State<'_, ShellState>,
+    patch: SettingsPatchDTO,
+) -> CommandResult<SettingsDTO> {
+    let core = core_of(&state).await?;
+    let revision = core
+        .update_settings(|current| Ok(apply_settings_patch(&patch, current)))
+        .await
+        .map_err(AppErrorDTO::from)?;
+    state::publish_settings(&app, &core);
+    let mut dto = settings_dto(&core.settings());
+    dto.revision = Some(revision);
+    Ok(dto)
 }
 
 // ---------------------------------------------------------------------------
@@ -681,29 +727,57 @@ pub async fn pick_directory(app: AppHandle) -> CommandResult<Option<String>> {
     }
 }
 
+/// 文件缺失的可读错误：前端据此提示重新下载/重新解析（design D8/3.3）。
+fn file_missing_error(path: &Path) -> AppErrorDTO {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    AppErrorDTO {
+        kind: "file-missing".into(),
+        message: format!("文件不存在或已被移动：{name}"),
+        actions: vec!["retry-download".into()],
+    }
+}
+
+fn invalidate_file_status(core: Option<&Core>, path: &str) {
+    if let Some(core) = core {
+        core.file_status.invalidate(path);
+    }
+}
+
 #[tauri::command]
 pub async fn reveal_output(
     app: AppHandle,
     state: State<'_, ShellState>,
     task_id: String,
 ) -> CommandResult<()> {
-    let core = core_of(&state).await?;
-    let path = core
-        .snapshot()
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .and_then(|task| task.output_path.clone())
-        .ok_or_else(|| AppErrorDTO::new("unknown", format!("任务 {task_id} 还没有输出文件")))?;
-    reveal_path(app, path)
-}
-
-#[tauri::command]
-pub fn reveal_path(app: AppHandle, path: String) -> CommandResult<()> {
     use tauri_plugin_opener::OpenerExt;
+    let core = core_of(&state).await?;
+    // 多产物任务优先定位第一个主产物；旧记录回退 output_path（design D7/3.3）。
+    let path = {
+        let snapshot = core.snapshot();
+        let task = snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .ok_or_else(|| AppErrorDTO::new("unknown", format!("任务不存在：{task_id}")))?;
+        task.artifacts
+            .first()
+            .map(|artifact| artifact.path.clone())
+            .or_else(|| task.output_path.clone())
+            .ok_or_else(|| AppErrorDTO::new("unknown", format!("任务 {task_id} 还没有输出文件")))?
+    };
+    // 文件操作前做权威校验，不信任展示缓存（design D9/7.2）。
+    if !PathBuf::from(&path).is_file() {
+        invalidate_file_status(Some(&core), &path);
+        crate::events::emit(&app, crate::events::FILES_INVALIDATED, ());
+        return Err(file_missing_error(&PathBuf::from(&path)));
+    }
     app.opener()
         .reveal_item_in_dir(PathBuf::from(&path))
         .map_err(|e| {
+            invalidate_file_status(Some(&core), &path);
             AppErrorDTO::new(
                 "unknown",
                 format!("{}失败: {e}", crate::platform::REVEAL_LABEL),
@@ -712,8 +786,39 @@ pub fn reveal_path(app: AppHandle, path: String) -> CommandResult<()> {
 }
 
 #[tauri::command]
-pub fn open_file(app: AppHandle, path: String) -> CommandResult<()> {
+pub async fn reveal_path(
+    app: AppHandle,
+    state: State<'_, ShellState>,
+    path: String,
+) -> CommandResult<()> {
     use tauri_plugin_opener::OpenerExt;
+    let core = state.try_core();
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        invalidate_file_status(core.as_deref(), &path);
+        return Err(file_missing_error(&target));
+    }
+    app.opener().reveal_item_in_dir(&target).map_err(|e| {
+        invalidate_file_status(core.as_deref(), &path);
+        AppErrorDTO::new(
+            "unknown",
+            format!("{}失败: {e}", crate::platform::REVEAL_LABEL),
+        )
+    })
+}
+
+#[tauri::command]
+pub async fn open_file(
+    app: AppHandle,
+    state: State<'_, ShellState>,
+    path: String,
+) -> CommandResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let core = state.try_core();
+    if !PathBuf::from(&path).is_file() {
+        invalidate_file_status(core.as_deref(), &path);
+        return Err(file_missing_error(&PathBuf::from(&path)));
+    }
     app.opener()
         .open_path(path, None::<&str>)
         .map_err(|e| AppErrorDTO::new("unknown", format!("打开文件失败: {e}")))
@@ -721,9 +826,12 @@ pub fn open_file(app: AppHandle, path: String) -> CommandResult<()> {
 
 #[tauri::command]
 pub async fn show_logs(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {
+    use tauri_plugin_opener::OpenerExt;
     let dir = state.log_dir();
     let _ = std::fs::create_dir_all(&dir);
-    reveal_path(app, dir.to_string_lossy().into_owned())
+    app.opener()
+        .reveal_item_in_dir(&dir)
+        .map_err(|e| AppErrorDTO::new("unknown", format!("打开日志目录失败: {e}")))
 }
 
 #[tauri::command]

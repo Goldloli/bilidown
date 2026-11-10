@@ -4,9 +4,9 @@
 //! 避免出现「窗口隐藏后无法恢复」的状态。
 
 use crate::window;
+use tauri::AppHandle;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::AppHandle;
 pub const TRAY_ID: &str = "main-tray";
 pub const TRAY_SHOW: &str = "tray-show";
 pub const TRAY_PAUSE_ALL: &str = "tray-pause-all";
@@ -17,7 +17,9 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItemBuilder::with_id(TRAY_SHOW, "显示主窗口").build(app)?;
     let pause = MenuItemBuilder::with_id(TRAY_PAUSE_ALL, "暂停全部下载").build(app)?;
     let quit = MenuItemBuilder::with_id(TRAY_QUIT, "退出 bilidown").build(app)?;
-    let menu = MenuBuilder::new(app).items(&[&show, &pause, &quit]).build()?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&show, &pause, &quit])
+        .build()?;
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)

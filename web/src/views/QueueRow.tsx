@@ -1,6 +1,8 @@
 import { t } from '../i18n/zh-CN';
 import { api } from '../lib/ipc';
 import { isPending, pendingLabel } from '../lib/capabilities';
+import { errorMessageOf } from '../lib/errors';
+import { taskFileTarget } from '../lib/fileAccess';
 import { formatBytes, formatEta, formatSpeed } from '../lib/format';
 import { kindIcon, kindLabel, statusLabel } from '../lib/media';
 import { CAPSULE_TONE_STYLE, capsuleView, taskSubline } from '../lib/taskDisplay';
@@ -48,18 +50,31 @@ function RowAction({
 export function QueueRow({ task }: QueueRowProps) {
   const openPanel = useUiStore((s) => s.openPanel);
   const openContext = useUiStore((s) => s.openContext);
+  const pushToast = useUiStore((s) => s.pushToast);
   const confirm = useUiStore((s) => s.confirm);
   const pause = useQueueStore((s) => s.pause);
   const resume = useQueueStore((s) => s.resume);
   const retry = useQueueStore((s) => s.retry);
   const remove = useQueueStore((s) => s.remove);
+  const retryPersistence = useQueueStore((s) => s.retryPersistence);
   const capsule = capsuleView(task);
   const toneStyle = CAPSULE_TONE_STYLE[capsule.tone];
+  const fileTarget = taskFileTarget(task);
   const canPause = ['queued', 'resolving', 'downloading', 'merging'].includes(task.status);
   const canResume = task.status === 'paused';
   const canRetry = ['failed', 'cancelled'].includes(task.status);
   const completed = task.status === 'completed';
   const failed = task.status === 'failed';
+
+  const revealCompleted = () => {
+    if (!fileTarget.available) {
+      pushToast({ kind: 'warning', message: fileTarget.reason ?? t('file.missing') });
+      return;
+    }
+    void api.openInFinder(fileTarget.path).catch((error) => {
+      pushToast({ kind: 'error', message: t('file.revealFailed', { message: errorMessageOf(error) }) });
+    });
+  };
 
   const rightMeta = (() => {
     switch (task.status) {
@@ -163,9 +178,26 @@ export function QueueRow({ task }: QueueRowProps) {
       <div className="flex min-w-0 flex-1 flex-col justify-between py-[2px]">
         <div className="flex items-start gap-2">
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-semibold leading-[18px] text-fg" title={task.title}>
-              {task.title}
-            </h3>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <h3 className="min-w-0 flex-1 truncate text-sm font-semibold leading-[18px] text-fg" title={task.title}>
+                {task.title}
+              </h3>
+              {task.persistError && (
+                <button
+                  type="button"
+                  aria-label={t('persist.retry')}
+                  title={`${task.persistError}\n${t('persist.retry')}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void retryPersistence();
+                  }}
+                  className="inline-flex shrink-0 items-center gap-0.5 rounded-[4px] px-1 py-[1px] text-[10px] leading-[13px] text-warning hover:bg-hover"
+                >
+                  <Icon name="warning" size={10} />
+                  {t('persist.rowBadge')}
+                </button>
+              )}
+            </div>
             <p className="mt-[2px] truncate text-2xs leading-[15px] text-fg2">{taskSubline(task)}</p>
           </div>
           <div className="relative flex h-6 shrink-0 items-center">
@@ -237,7 +269,7 @@ export function QueueRow({ task }: QueueRowProps) {
                   title={pendingLabel('reveal', t('queue.row.reveal'))}
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (!isPending('reveal')) void api.openInFinder(task.outputPath ?? '');
+                    if (!isPending('reveal')) revealCompleted();
                   }}
                   className="grid h-5 w-5 place-items-center rounded-full text-white/85 hover:bg-white/15 hover:text-white"
                 >

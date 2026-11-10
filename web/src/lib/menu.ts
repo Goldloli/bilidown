@@ -1,6 +1,7 @@
 import { t } from '../i18n/zh-CN';
 import { api } from './ipc';
 import { addFromClipboard, handleParseText } from './actions';
+import { attemptQuit } from './quit';
 import { useAccountStore } from '../stores/useAccountStore';
 import { useQueueStore } from '../stores/useQueueStore';
 import { useUiStore } from '../stores/useUiStore';
@@ -41,7 +42,8 @@ export async function handleMenuAction(id: string): Promise<void> {
         confirmLabel: '清空',
         danger: true,
       });
-      if (ok) await queue.cancelAllQueued();
+      // 菜单 / 快捷键 / 界面按钮统一走 clear_inactive（design D2/6.3）
+      if (ok) await queue.clearInactive();
       break;
     }
     case 'preferences':
@@ -76,7 +78,9 @@ export async function handleMenuAction(id: string): Promise<void> {
       break;
     case 'quit': {
       const hasActive = await api.requestQuitCheck();
-      if (!hasActive) await api.quitApp();
+      // 有活跃任务时后端已发送 shell://quit-requested，由主窗口确认后退出；
+      // 无活跃任务直接尝试退出，保存失败由 attemptQuit 弹出重试/仍然退出。
+      if (!hasActive) await attemptQuit();
       break;
     }
     case 'open-link-from-menu': {

@@ -12,6 +12,8 @@ export function applyPlatform(os: string): void {
 }
 
 export function currentPlatform(): Platform {
+  // 非浏览器上下文（SSR/单测/构建脚本）没有平台信息，按 other 处理
+  if (typeof document === 'undefined') return 'other';
   const value = document.documentElement.dataset.os;
   if (value === 'windows' || value === 'macos' || value === 'linux') return value;
   return 'other';

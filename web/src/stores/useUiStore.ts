@@ -36,6 +36,8 @@ interface UiState {
   panel: PanelState;
   toasts: ToastItem[];
   confirmRequest: ConfirmRequest | null;
+  /** 退出前保存失败（design D8/3.9）：非 null 时显示「重试保存 / 仍然退出」对话框 */
+  quitFailure: string | null;
   contextTarget: ContextTarget | null;
   searchOpen: boolean;
   /** 队列视图当前渲染（虚拟滚动）的行数，用于判断是否需要显示总数 */
@@ -62,6 +64,8 @@ interface UiState {
     danger?: boolean;
   }) => Promise<boolean>;
   resolveConfirm: (ok: boolean) => void;
+  showQuitFailure: (message: string) => void;
+  dismissQuitFailure: () => void;
   openContext: (target: ContextTarget) => void;
   closeContext: () => void;
 }
@@ -73,6 +77,7 @@ export const useUiStore = create<UiState>()((set, get) => ({
   panel: null,
   toasts: [],
   confirmRequest: null,
+  quitFailure: null,
   contextTarget: null,
   searchOpen: false,
   renderedQueueRows: 0,
@@ -122,6 +127,9 @@ export const useUiStore = create<UiState>()((set, get) => ({
     set({ confirmRequest: null });
     request?.resolve(ok);
   },
+
+  showQuitFailure: (message) => set({ quitFailure: message }),
+  dismissQuitFailure: () => set({ quitFailure: null }),
 
   openContext: (contextTarget) => set({ contextTarget }),
   closeContext: () => set({ contextTarget: null }),

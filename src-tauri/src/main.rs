@@ -55,13 +55,12 @@ fn main() {
         }))
         .plugin(logging::plugin())
         .plugin({
-            let window_state = tauri_plugin_window_state::Builder::default()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
-                        | tauri_plugin_window_state::StateFlags::FULLSCREEN,
-                );
+            let window_state = tauri_plugin_window_state::Builder::default().with_state_flags(
+                tauri_plugin_window_state::StateFlags::SIZE
+                    | tauri_plugin_window_state::StateFlags::POSITION
+                    | tauri_plugin_window_state::StateFlags::MAXIMIZED
+                    | tauri_plugin_window_state::StateFlags::FULLSCREEN,
+            );
             // macOS / Windows 设置每次相对主窗口定位；主窗口仍恢复原有状态。
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             let window_state = window_state.skip_initial_state("preferences");
@@ -80,6 +79,8 @@ fn main() {
         commands::open_preferences,
         commands::quit_app,
         commands::get_diagnostics,
+        commands::retry_init,
+        commands::retry_network,
         maintenance::get_storage_stats,
         maintenance::clear_app_cache,
         maintenance::open_data_dir,
@@ -97,6 +98,8 @@ fn main() {
         commands::retry_all,
         commands::clear_finished,
         commands::clear_inactive,
+        commands::retry_persistence,
+        commands::force_quit_app,
         // 账户 / 登录
         commands::get_account,
         commands::login_start,
@@ -105,6 +108,7 @@ fn main() {
         commands::refresh_account,
         // 设置
         commands::get_settings,
+        commands::patch_settings,
         commands::set_settings,
         // 历史
         commands::list_history,
@@ -146,6 +150,8 @@ fn main() {
         commands::open_preferences,
         commands::quit_app,
         commands::get_diagnostics,
+        commands::retry_init,
+        commands::retry_network,
         maintenance::get_storage_stats,
         maintenance::clear_app_cache,
         maintenance::open_data_dir,
@@ -162,12 +168,15 @@ fn main() {
         commands::retry_all,
         commands::clear_finished,
         commands::clear_inactive,
+        commands::retry_persistence,
+        commands::force_quit_app,
         commands::get_account,
         commands::login_start,
         commands::login_poll,
         commands::login_logout,
         commands::refresh_account,
         commands::get_settings,
+        commands::patch_settings,
         commands::set_settings,
         commands::list_history,
         commands::remove_history,

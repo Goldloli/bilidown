@@ -1,7 +1,10 @@
 import { createRoot } from 'react-dom/client';
+import { useEffect } from 'react';
 import './styles/app.css';
 import { App } from './App';
+import { BootError } from './components/BootError';
 import { bootstrapApp } from './lib/bootstrap';
+import { useStartupStore } from './stores/useStartupStore';
 import { devParams } from './dev/scenario';
 import { applyTheme, readThemeOverride, systemTheme } from './lib/theme';
 import { applyGlass, readGlassPref } from './lib/glass';
@@ -12,6 +15,7 @@ const params = devParams();
 if (params.qa) {
   document.documentElement.dataset.qa = 'screenshot';
 }
+// 主题/外观在首帧前应用，避免白闪；网络与后端准备不阻塞首屏（tasks 5.1）。
 applyTheme(readThemeOverride() ?? systemTheme());
 applyGlass(readGlassPref());
 applyAccent(readAccentPref());
@@ -19,24 +23,30 @@ const initialMotion = readMotionPref();
 applyMotion(initialMotion);
 watchSystemMotion(initialMotion, () => applyMotion(initialMotion));
 
-const container = document.getElementById('root');
+/** 首屏立即渲染骨架：bootstrap 在后台完成订阅与分区加载，不等待网络（tasks 5.1）。 */
+function Boot() {
+  const fatalError = useStartupStore((s) => s.fatalError);
 
-async function start() {
-  try {
-    await bootstrapApp();
-  } catch (error) {
-    console.error('[bilidown] bootstrap failed', error);
-    if (container) {
-      container.innerHTML =
-        '<div style="padding:40px;font-family:-apple-system,sans-serif;font-size:13px;color:#b3463f">初始化失败：' +
-        String(error instanceof Error ? error.message : error) +
-        '</div>';
-    }
-    return;
+  useEffect(() => {
+    void bootstrapApp();
+  }, []);
+
+  if (fatalError) {
+    return (
+      <BootError
+        message={fatalError}
+        onRetry={() => {
+          useStartupStore.getState().clearFatalError();
+          void bootstrapApp();
+        }}
+      />
+    );
   }
-  if (container) {
-    createRoot(container).render(<App />);
-  }
+  return <App />;
 }
 
-void start();
+const container = document.getElementById('root');
+if (container) {
+  // 先渲染界面骨架（本地内容可用），bootstrap 在后台完成事件订阅与数据加载。
+  createRoot(container).render(<Boot />);
+}

@@ -25,6 +25,12 @@ pub const SHELL_DRAG: &str = "shell://drag";
 pub const SHELL_DROP: &str = "shell://drop";
 /// 有活跃任务时请求退出（payload: QueueStatsDTO）
 pub const SHELL_QUIT_REQUESTED: &str = "shell://quit-requested";
+/// core 启动阶段（payload: CoreStatusDTO，design D5/5.2/5.4）
+pub const CORE_STATUS: &str = "shell://core-status";
+/// 封面缓存已清理（payload: 无；前端失效内存图片缓存，design D11/7.7）
+pub const COVERS_CLEARED: &str = "covers://cleared";
+/// 文件状态缓存失效（payload: 无；前端重新拉取列表，design D9/7.2）
+pub const FILES_INVALIDATED: &str = "files://invalidated";
 
 pub fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
     if let Err(err) = app.emit(event, payload) {

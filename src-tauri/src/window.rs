@@ -45,6 +45,13 @@ pub fn install(app: &AppHandle) {
     };
     let handle = app.clone();
     window.on_window_event(move |event| match event {
+        WindowEvent::Focused(true) => {
+            // 窗口重新激活：失效文件状态展示缓存并通知前端刷新（design D9/7.2）。
+            if let Some(core) = handle.state::<ShellState>().try_core() {
+                core.file_status.invalidate_all();
+            }
+            crate::events::emit(&handle, crate::events::FILES_INVALIDATED, ());
+        }
         WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
             #[cfg(target_os = "windows")]
@@ -225,7 +232,9 @@ pub fn quit_and_install(app: &AppHandle, installer: PathBuf) {
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
             {
-                Ok(_) => tracing::info!(target: "shell::update", path = %installer.display(), "已启动安装器，应用退出"),
+                Ok(_) => {
+                    tracing::info!(target: "shell::update", path = %installer.display(), "已启动安装器，应用退出")
+                }
                 Err(err) => tracing::warn!(target: "shell::update", error = %err, "启动安装器失败"),
             }
         }

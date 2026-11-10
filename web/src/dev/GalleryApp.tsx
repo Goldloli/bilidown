@@ -1,3 +1,4 @@
+import '../i18n/zh-CN.dynamic';
 import { useEffect, useState } from 'react';
 import { devParams } from './scenario';
 import { ERR_AUTH, ERR_FFMPEG, statesTasks } from './mockData';

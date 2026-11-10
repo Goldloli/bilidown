@@ -147,11 +147,35 @@ export interface QueueTask {
   artifactCoverage?: ArtifactCoverage;
   /** 下载产物（可选；真实模式待 contract/adapt 接线） */
   extras?: TaskExtras;
+  /** 任务记录保存失败的可读原因；null/undefined = 已可靠保存（design D8/3.8） */
+  persistError?: string | null;
   error: TaskError | null;
   /** 从上次退出恢复 */
   restored: boolean;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 批量清理结果（clear_finished / clear_inactive） */
+export interface ClearOutcome {
+  removed: number;
+  /** 删除失败、仍保留在队列中的任务 id */
+  failed: string[];
+}
+
+/** 单个内容入队失败（design D8/6.4：按内容记录成功/失败，重试只提交失败内容） */
+export interface EnqueueFailure {
+  itemId: string;
+  title: string;
+  message: string;
+}
+
+/** 一次确认可能拆成多个独立 add_tasks 请求的结果 */
+export interface EnqueueOutcome {
+  taskIds: string[];
+  /** 已成功入队的内容 id；重试时不得重复提交 */
+  succeededItemIds: string[];
+  failures: EnqueueFailure[];
 }
 
 export interface QueueStats {
@@ -177,10 +201,21 @@ export interface AccountState {
   capability: { anonymousMax: number; signedInMax: number; vipMax: number };
 }
 
+/**
+ * 账号网络校验状态（design D5/tasks 5.4）：
+ * · idle：尚未开始（启动装配中）
+ * · pending：本地凭据已装载，网络校验未结束（不把匿名结果当最终状态）
+ * · ready：网络阶段结束，账号结果可采信
+ * · degraded：网络准备超时/失败（不清除凭据，可重试）
+ */
+export type AccountValidation = 'idle' | 'pending' | 'ready' | 'degraded';
+
 export interface QueueSnapshot {
   tasks: QueueTask[];
   stats: QueueStats;
   account: AccountState;
+  /** 队列修订号（来自后端 seq）：较旧的初始读取/迟到快照不得覆盖新状态（tasks 5.4） */
+  revision?: number;
 }
 
 export type HistoryStatus = 'completed' | 'failed' | 'cancelled';

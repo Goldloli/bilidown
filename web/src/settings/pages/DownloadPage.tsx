@@ -1,3 +1,4 @@
+import '../../i18n/zh-CN.dynamic';
 import { t } from '../../i18n/zh-CN';
 import { FieldRow } from '../../components/FieldRow';
 import { NumberField } from '../../components/NumberField';
@@ -16,7 +17,9 @@ export function DownloadPage() {
   const toggle = (
     key: 'downloadSubtitle' | 'downloadCover' | 'checkUpdatesOnStartup',
     checked: boolean,
-  ): void => save({ download: { [key]: checked } });
+  ): void => {
+    void save({ download: { [key]: checked } });
+  };
 
   return (
     <div>

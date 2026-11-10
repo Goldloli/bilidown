@@ -1,8 +1,12 @@
 import { devParams } from '../dev/scenario';
 import { BrandGlyph } from '../components/BrandMark';
-import { AccountButton } from './AccountButton';
+import { Skeleton } from '../components/Skeleton';
+import { useAsyncComponent } from '../lib/asyncComponent';
 import { TrafficLights } from './TrafficLights';
 import { WindowControls } from './WindowControls';
+
+const loadAccountButton = () =>
+  import('./AccountButton').then((module) => module.AccountButton);
 
 /**
  * 标题栏：macOS 使用系统 overlay 交通灯（CSS 左侧留白 80px）；
@@ -11,6 +15,7 @@ import { WindowControls } from './WindowControls';
  */
 export function TitleBar() {
   const mock = devParams().mock;
+  const accountButton = useAsyncComponent(loadAccountButton, true);
 
   return (
     <header
@@ -25,7 +30,11 @@ export function TitleBar() {
         </span>
       </div>
       <div className="no-drag ml-auto flex items-center gap-1.5">
-        <AccountButton />
+        {accountButton.Page ? (
+          <accountButton.Page />
+        ) : (
+          <Skeleton className="h-6 w-6" rounded="rounded-full" />
+        )}
       </div>
       <WindowControls />
     </header>

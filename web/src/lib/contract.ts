@@ -99,6 +99,17 @@ export interface TaskDTO {
     subtitleError: string | null;
     coverError: string | null;
   };
+  /**
+   * 记录保存失败的可读原因（design D8/3.8）；null/省略 = 已可靠保存。
+   * 非空时界面需提供「重试保存」（retry_persistence），且不得宣称该任务已可靠记录。
+   */
+  persistError?: string | null;
+}
+
+/** 批量清理结果：真实移除数量 + 删除失败、仍保留在队列中的任务 id（design D2/3.5） */
+export interface ClearOutcomeDTO {
+  removed: number;
+  failed: string[];
 }
 
 export interface QueueStatsDTO {
@@ -296,6 +307,34 @@ export interface SettingsDTO {
   glassBackground?: boolean;
   ffmpegDetected?: boolean;
   ffmpegVersion?: string | null;
+  /** 进程内单调递增的设置修订号（get/patch/set 响应与 settings://changed 事件都携带） */
+  revision?: number;
+}
+
+/**
+ * 设置增量提交（design D3）：只包含可编辑业务字段。
+ * 省略字段 = 保持不变；`null` = 清空可空字段（downloadDir/ffmpegPath/accentColor）。
+ */
+export interface SettingsPatchDTO {
+  downloadDir?: string | null;
+  maxConcurrent?: number;
+  quality?: string;
+  codec?: string;
+  audioFormat?: string;
+  ffmpegPath?: string | null;
+  proxy?: ProxyDTO;
+  theme?: 'system' | 'light' | 'dark';
+  notifications?: boolean;
+  watchClipboard?: boolean;
+  historyLimit?: number;
+  writeMetadata?: boolean;
+  downloadSubtitle?: boolean;
+  downloadCover?: boolean;
+  checkUpdatesOnStartup?: boolean;
+  accentColor?: string | null;
+  motion?: 'system' | 'reduce' | 'normal';
+  qualityFallback?: boolean;
+  glassBackground?: boolean;
 }
 
 export interface AppInfoDTO {
@@ -331,6 +370,17 @@ export interface DragPayloadDTO {
   active: boolean;
 }
 
+/** core 启动阶段（design D5）：本地先就绪，网络阶段独立并在 5 秒预算内进入 ready/degraded。 */
+export type CoreStatusStage = 'local-ready' | 'network-ready' | 'network-degraded';
+
+export interface CoreStatusDTO {
+  stage: CoreStatusStage;
+  /** 网络准备代次：旧代次结果不得覆盖新状态（tasks 5.4） */
+  generation: number;
+  degraded: boolean;
+  error?: string | null;
+}
+
 export interface DropPayloadDTO {
   paths: string[];
   text: string;
@@ -355,6 +405,12 @@ export const CONTRACT_EVENTS = {
   shellDrag: 'shell://drag',
   shellDrop: 'shell://drop',
   shellQuitRequested: 'shell://quit-requested',
+  /** 启动分阶段（design D5） */
+  coreStatus: 'shell://core-status',
+  /** 封面缓存清理完成：前端失效内存图片缓存（design D11/7.7） */
+  coversCleared: 'covers://cleared',
+  /** 文件状态展示缓存失效：前端重新拉取队列/历史（design D9/7.2） */
+  filesInvalidated: 'files://invalidated',
 } as const;
 
 export type ContractEventName = (typeof CONTRACT_EVENTS)[keyof typeof CONTRACT_EVENTS];
