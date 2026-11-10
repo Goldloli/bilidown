@@ -1401,10 +1401,11 @@ impl Inner {
         if self.snapshot_dirty && self.last_publish.elapsed() >= SNAPSHOT_INTERVAL {
             self.publish();
         }
-        if !self.dirty.is_empty() && self.last_progress_flush.elapsed() >= self.flush_backoff {
-            if let Err(error) = self.flush_dirty().await {
-                tracing::warn!(error = %error, "flush progress failed");
-            }
+        if !self.dirty.is_empty()
+            && self.last_progress_flush.elapsed() >= self.flush_backoff
+            && let Err(error) = self.flush_dirty().await
+        {
+            tracing::warn!(error = %error, "flush progress failed");
         }
         if !self.pending_cleanups.is_empty() {
             self.retry_pending_cleanups().await;
