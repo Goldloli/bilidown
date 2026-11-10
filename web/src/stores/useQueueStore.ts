@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { api } from '../lib/ipc';
-import type { QueueSnapshot, QueueTask } from '../lib/types';
+import { errorMessageOf } from '../lib/errors';
+import { t } from '../i18n/zh-CN';
+import type { ClearOutcome, QueueSnapshot, QueueTask } from '../lib/types';
 import type { QueueEvent } from '../lib/types';
 import { useUiStore } from './useUiStore';
 
@@ -23,16 +25,44 @@ interface QueueState {
   cancel: (id: string) => Promise<void>;
   retry: (id: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
+  /** 重试待保存的任务记录（不清产物、不重新下载） */
+  retryPersistence: () => Promise<void>;
   clearCompleted: () => Promise<void>;
   pauseAll: () => Promise<void>;
   resumeAll: () => Promise<void>;
   retryFailed: () => Promise<void>;
-  cancelAllQueued: () => Promise<void>;
+  /** 清空未激活任务（排队/暂停/已取消）；菜单、快捷键、界面按钮共用 */
+  clearInactive: () => Promise<void>;
 }
 
 function toastError(error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
-  useUiStore.getState().pushToast({ kind: 'error', message });
+  useUiStore.getState().pushToast({ kind: 'error', message: errorMessageOf(error) });
+}
+
+/** 批量清理反馈：成功数用真实 removed，failed 非空时明确「部分失败，保留 N 行」 */
+function notifyClearOutcome(outcome: ClearOutcome, kind: 'finished' | 'inactive'): void {
+  const removed = outcome.removed;
+  const failed = outcome.failed.length;
+  const push = useUiStore.getState().pushToast;
+  const successText =
+    kind === 'finished'
+      ? t('toast.clearFinished', { n: removed })
+      : t('toast.clearInactive', { n: removed });
+  if (failed > 0) {
+    push({
+      kind: 'warning',
+      message:
+        removed > 0
+          ? `${successText}；${t('toast.clearPartial', { n: failed })}`
+          : t('toast.clearPartial', { n: failed }),
+    });
+    return;
+  }
+  if (removed > 0) {
+    push({ kind: 'info', message: successText });
+    return;
+  }
+  push({ kind: 'info', message: t('toast.clearEmpty') });
 }
 
 export const useQueueStore = create<QueueState>()((set, get) => ({
@@ -127,10 +157,23 @@ export const useQueueStore = create<QueueState>()((set, get) => ({
       toastError(error);
     }
   },
+  retryPersistence: async () => {
+    try {
+      await api.retryPersistence();
+      useUiStore.getState().pushToast({
+        kind: 'success',
+        message: t('toast.persistenceRetried'),
+      });
+    } catch (error) {
+      useUiStore.getState().pushToast({
+        kind: 'error',
+        message: t('toast.persistenceRetryFailed', { message: errorMessageOf(error) }),
+      });
+    }
+  },
   clearCompleted: async () => {
     try {
-      await api.clearCompleted();
-      useUiStore.getState().pushToast({ kind: 'info', message: '已清空已完成任务' });
+      notifyClearOutcome(await api.clearCompleted(), 'finished');
     } catch (error) {
       toastError(error);
     }
@@ -156,14 +199,11 @@ export const useQueueStore = create<QueueState>()((set, get) => ({
       toastError(error);
     }
   },
-  cancelAllQueued: async () => {
-    const queued = (get().snapshot?.tasks ?? []).filter((t) => t.status === 'queued');
-    for (const task of queued) {
-      try {
-        await api.cancelTask(task.id);
-      } catch (error) {
-        toastError(error);
-      }
+  clearInactive: async () => {
+    try {
+      notifyClearOutcome(await api.clearInactive(), 'inactive');
+    } catch (error) {
+      toastError(error);
     }
   },
 }));

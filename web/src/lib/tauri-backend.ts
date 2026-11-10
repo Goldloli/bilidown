@@ -5,6 +5,7 @@ import type {
   AddOptionsDTO,
   AddTasksResultDTO,
   AppInfoDTO,
+  ClearOutcomeDTO,
   HistoryEntryDTO,
   HistoryFilterDTO,
   LoginPollDTO,
@@ -34,6 +35,7 @@ export function createTauriBackend(): Backend {
     getAppInfo: () => invoke<AppInfoDTO>('get_app_info'),
     openPreferences: () => invoke<void>('open_preferences'),
     quitApp: () => invoke<void>('quit_app'),
+    forceQuitApp: () => invoke<void>('force_quit_app'),
     getDiagnostics: () => invoke<string>('get_diagnostics'),
 
     parseInput: (input) => invoke<ParseResultDTO>('parse_input', { input }),
@@ -48,8 +50,9 @@ export function createTauriBackend(): Backend {
     startAll: () => invoke<number>('start_all'),
     pauseAll: () => invoke<number>('pause_all'),
     retryAll: () => invoke<number>('retry_all'),
-    clearFinished: () => invoke<number>('clear_finished'),
-    clearInactive: () => invoke<number>('clear_inactive'),
+    clearFinished: () => invoke<ClearOutcomeDTO>('clear_finished'),
+    clearInactive: () => invoke<ClearOutcomeDTO>('clear_inactive'),
+    retryPersistence: () => invoke<void>('retry_persistence'),
 
     getAccount: () => invoke<AccountInfoDTO | null>('get_account'),
     loginStart: () => invoke<LoginStartDTO>('login_start'),

@@ -5,6 +5,7 @@ import { copyLink, handleParseText } from '../lib/actions';
 import { formatBytes, formatDateTime, formatDateGroup } from '../lib/format';
 import { kindIcon } from '../lib/media';
 import { api } from '../lib/ipc';
+import { errorMessageOf } from '../lib/errors';
 import { isPending, pendingLabel, type PendingFeature } from '../lib/capabilities';
 import type { HistoryEntry, HistoryStatus, TaskArtifact } from '../lib/types';
 import { useHistoryStore } from '../stores/useHistoryStore';
@@ -55,8 +56,13 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
       : []);
 
   const reveal = () => {
-    if (!entry.fileExists) return;
-    void api.openInFinder(entry.outputPath);
+    if (!entry.fileExists) {
+      pushToast({ kind: 'warning', message: t('file.missing') });
+      return;
+    }
+    void api.openInFinder(entry.outputPath).catch((error) => {
+      pushToast({ kind: 'error', message: t('file.revealFailed', { message: errorMessageOf(error) }) });
+    });
   };
 
   const open = () => {
@@ -64,7 +70,9 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
       pushToast({ kind: 'warning', message: t('history.missing') });
       return;
     }
-    void api.openFile(entry.outputPath);
+    void api.openFile(entry.outputPath).catch((error) => {
+      pushToast({ kind: 'error', message: t('file.openFailed', { message: errorMessageOf(error) }) });
+    });
   };
 
   const redownload = () => {
@@ -163,8 +171,8 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
           className="absolute right-0 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded-[6px] pl-1 opacity-0 transition-opacity duration-[var(--dur-fast)] group-hover:opacity-100 group-focus-within:opacity-100"
           style={{ background: 'var(--bg-content)' }}
         >
-          {action('reveal', t('history.reveal'), reveal, !entry.fileExists, 'reveal')}
-          {action('external', t('history.open'), open, !entry.fileExists, 'open-file')}
+          {action('reveal', t('history.reveal'), reveal, false, 'reveal')}
+          {action('external', t('history.open'), open, false, 'open-file')}
           {action('refresh', t('history.redownload'), redownload, false, 'redownload')}
           {action('copy', t('history.copy'), () => void copyLink(entry.pageUrl), false, 'copy-link')}
           {action('trash', t('history.delete'), del)}

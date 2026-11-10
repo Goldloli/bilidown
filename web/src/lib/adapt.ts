@@ -1,5 +1,6 @@
 /** 契约 DTO ↔ UI 内部模型 的适配层（唯一转换点，便于真实 IPC 对齐） */
 import { AUDIO_FORMATS, QUALITY_TIERS, VIDEO_CODECS } from './constants';
+import { requiresAddConfirmation } from './addSelection';
 import type {
   AccountInfoDTO,
   AppErrorDTO,
@@ -310,6 +311,7 @@ export function taskFromDTO(dto: TaskDTO): QueueTask {
         }
       : undefined,
     error: errorFromDTO(dto.error),
+    persistError: dto.persistError ?? null,
     restored: dto.restored,
     createdAt: dto.createdAt,
     updatedAt: dto.updatedAt,
@@ -362,6 +364,7 @@ export function taskToDTO(task: QueueTask, sortIndex = 0): TaskDTO {
     audioFormat: task.params.audio,
     outputDir: task.params.outputDir,
     durationSecs: task.durationSec,
+    persistError: task.persistError ?? null,
   };
 }
 
@@ -518,8 +521,8 @@ export function parseResultFromDTO(dto: ParseResultDTO, account: AccountState | 
   return {
     items: [item],
     failures: [],
-    requiresConfirmation:
-      item.entries.length > 1 || item.entries.filter((entry) => entry.selectedByDefault).length > 1,
+    // 单次解析只有一条内容；实际条目总数 > 1 才需确认（不用默认勾选数量代替）
+    requiresConfirmation: requiresAddConfirmation([item]),
   };
 }
 

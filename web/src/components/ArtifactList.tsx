@@ -1,5 +1,8 @@
 import { api } from '../lib/ipc';
+import { errorMessageOf } from '../lib/errors';
+import { artifactFileTarget } from '../lib/fileAccess';
 import { formatBytes } from '../lib/format';
+import { t } from '../i18n/zh-CN';
 import type { TaskArtifact } from '../lib/types';
 import { useUiStore } from '../stores/useUiStore';
 import { Icon } from './Icon';
@@ -26,20 +29,36 @@ export function ArtifactList({
 
   if (artifacts.length === 0) return null;
 
-  const run = (action: Promise<void>, failure: string) => {
-    void action.catch((error) => {
-      pushToast({
-        kind: 'error',
-        message: `${failure}：${error instanceof Error ? error.message : String(error)}`,
-      });
-    });
-  };
-
   return (
     <ul className={`space-y-1.5 ${className ?? ''}`}>
       {artifacts.map((artifact, index) => {
         const state = artifactState(artifact);
-        const canOpen = artifact.exists && artifact.sizeMatches && artifact.valid;
+        const target = artifactFileTarget(artifact);
+        const open = () => {
+          // 缺失/大小不符/记录异常时给出可读提示，不把失败当作打开成功
+          if (!target.available) {
+            pushToast({ kind: 'warning', message: target.reason ?? t('file.missing') });
+            return;
+          }
+          void api.openFile(target.path).catch((error) => {
+            pushToast({
+              kind: 'error',
+              message: t('file.openFailed', { message: errorMessageOf(error) }),
+            });
+          });
+        };
+        const reveal = () => {
+          if (!artifact.exists) {
+            pushToast({ kind: 'warning', message: t('file.missing') });
+            return;
+          }
+          void api.openInFinder(artifact.path).catch((error) => {
+            pushToast({
+              kind: 'error',
+              message: t('file.revealFailed', { message: errorMessageOf(error) }),
+            });
+          });
+        };
         return (
           <li
             key={`${artifact.path}:${artifact.kind}:${index}`}
@@ -62,27 +81,29 @@ export function ArtifactList({
               <div className="flex shrink-0 items-center gap-1">
                 <button
                   type="button"
-                  disabled={!canOpen}
                   aria-label={`打开第 ${index + 1} 个文件`}
-                  title="打开文件"
+                  title={target.available ? '打开文件' : (target.reason ?? t('file.missing'))}
                   onClick={(event) => {
                     event.stopPropagation();
-                    run(api.openFile(artifact.path), '打开文件失败');
+                    open();
                   }}
-                  className="grid h-6 w-6 place-items-center rounded-[6px] text-fg2 hover:bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-30"
+                  className={`grid h-6 w-6 place-items-center rounded-[6px] text-fg2 hover:bg-hover hover:text-fg ${
+                    target.available ? '' : 'opacity-45'
+                  }`}
                 >
                   <Icon name="external" size={13} />
                 </button>
                 <button
                   type="button"
-                  disabled={!artifact.exists}
                   aria-label={`定位第 ${index + 1} 个文件`}
-                  title="定位文件"
+                  title={artifact.exists ? '定位文件' : t('file.missing')}
                   onClick={(event) => {
                     event.stopPropagation();
-                    run(api.openInFinder(artifact.path), '定位文件失败');
+                    reveal();
                   }}
-                  className="grid h-6 w-6 place-items-center rounded-[6px] text-fg2 hover:bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-30"
+                  className={`grid h-6 w-6 place-items-center rounded-[6px] text-fg2 hover:bg-hover hover:text-fg ${
+                    artifact.exists ? '' : 'opacity-45'
+                  }`}
                 >
                   <Icon name="reveal" size={13} />
                 </button>

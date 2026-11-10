@@ -20,6 +20,7 @@ import { useHistoryStore } from '../stores/useHistoryStore';
 import { useUiStore } from '../stores/useUiStore';
 import { handleMenuAction } from './menu';
 import { addFromClipboard, handleParseText } from './actions';
+import { attemptQuit } from './quit';
 import { applyPlatform, applyCapabilities } from './platform';
 import { applyGlass } from './glass';
 
@@ -99,7 +100,8 @@ async function doBootstrap(): Promise<void> {
         body: `有 ${pending} 个未完成任务。退出后将暂停传输并保存进度，下次启动时可恢复。`,
         confirmLabel: '退出',
       });
-      if (confirmed) await api.quitApp();
+      // 保存失败时由 attemptQuit 显示「重试保存 / 仍然退出」；正常退出不额外确认。
+      if (confirmed) await attemptQuit();
     })();
   });
 
@@ -167,5 +169,6 @@ async function doBootstrap(): Promise<void> {
     for (const notice of scenario.notices ?? []) {
       ui.pushNotice(notice);
     }
+    if (scenario.quitFailure) ui.showQuitFailure(scenario.quitFailure);
   }
 }

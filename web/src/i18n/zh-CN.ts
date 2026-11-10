@@ -500,6 +500,43 @@ export const zhCN = {
   'collection.seasonBody': '《{title}》共 {n} 集，是否下载整个合集？',
   'collection.seasonConfirm': '下载整个合集',
   'collection.seasonCurrent': '仅当前视频',
+
+  // ---- 任务记录持久化失败（design D8/3.8）----
+  'persist.rowBadge': '记录未保存',
+  'persist.title': '任务记录未保存',
+  'persist.body': '任务记录写入失败；已下载的文件与产物不受影响。可重试保存。',
+  'persist.retry': '重试保存',
+  'persist.retrying': '保存中…',
+
+  // ---- 文件缺失/操作失败（design D7/3.3）----
+  'file.missing': '文件已不存在，无法打开或定位',
+  'file.sizeMismatch': '文件大小与记录不一致，无法打开',
+  'file.invalid': '文件记录异常，无法打开',
+  'file.openFailed': '打开文件失败：{message}',
+  'file.revealFailed': '定位文件失败：{message}',
+
+  // ---- 退出保存失败（design D8/3.9）----
+  'quit.saveFailed.title': '退出前保存失败',
+  'quit.saveFailed.body': '退出前保存任务状态失败：{message}\n\n可以重试保存；或选择「仍然退出」，未保存的进度与记录可能丢失。',
+  'quit.saveFailed.retry': '重试保存',
+  'quit.saveFailed.force': '仍然退出',
+  'quit.saveFailed.cancel': '取消',
+  'quit.saveFailed.forceError': '仍然退出失败：{message}',
+
+  // ---- 批量清理与重试保存反馈（design D2/D8）----
+  'toast.clearFinished': '已清空 {n} 个已完成任务',
+  'toast.clearInactive': '已清空 {n} 个未激活任务',
+  'toast.clearPartial': '部分失败，保留 {n} 行',
+  'toast.clearEmpty': '没有可清理的任务',
+  'toast.persistenceRetried': '已重试保存任务记录',
+  'toast.persistenceRetryFailed': '重试保存失败：{message}',
+
+  // ---- 按内容分别入队（design D8/6.4）----
+  'add.partial.title': '以下内容入队失败',
+  'add.partial.summary': '已添加 {added} 个任务，{failed} 个内容入队失败',
+  'add.partial.allFailed': '{failed} 个内容入队失败',
+  'add.partial.retry': '重试失败内容（{n}）',
+  'add.partial.remaining': '剩余 {n} 个内容待入队',
 } as const;
 
 export type StringKey = keyof typeof zhCN;

@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useQueueStore } from '../src/stores/useQueueStore';
+import { useUiStore } from '../src/stores/useUiStore';
+import { api } from '../src/lib/ipc';
 import type { QueueSnapshot, QueueTask } from '../src/lib/types';
 import { ANONYMOUS_ACCOUNT } from '../src/lib/adapt';
 
@@ -95,5 +97,80 @@ describe('useQueueStore：快照与事件合并', () => {
     useQueueStore.getState().handleQueueEvent({ type: 'task-removed', taskId: 'a' });
     const ids = (useQueueStore.getState().snapshot?.tasks ?? []).map((task) => task.id);
     expect(ids).toEqual(['b']);
+  });
+});
+
+describe('useQueueStore：清空与持久化重试反馈（design D2/D8）', () => {
+  function lastToast() {
+    return useUiStore.getState().toasts.at(-1);
+  }
+
+  beforeEach(() => {
+    useUiStore.setState({ toasts: [] });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    useUiStore.setState({ toasts: [] });
+  });
+
+  it('清空已完成使用返回的 removed 数量提示', async () => {
+    vi.spyOn(api, 'clearCompleted').mockResolvedValue({ removed: 3, failed: [] });
+    const pushToast = vi.spyOn(useUiStore.getState(), 'pushToast');
+
+    await useQueueStore.getState().clearCompleted();
+
+    expect(pushToast).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'info', message: expect.stringContaining('3') }),
+    );
+  });
+
+  it('部分失败时不宣称全部清理成功，明确保留行数', async () => {
+    vi.spyOn(api, 'clearCompleted').mockResolvedValue({ removed: 2, failed: ['a', 'b'] });
+
+    await useQueueStore.getState().clearCompleted();
+
+    const toast = lastToast();
+    expect(toast?.kind).toBe('warning');
+    expect(toast?.message).toContain('部分失败');
+    expect(toast?.message).toContain('保留 2 行');
+  });
+
+  it('清空未激活统一走 clear_inactive（不再逐项取消）', async () => {
+    const clearInactive = vi
+      .spyOn(api, 'clearInactive')
+      .mockResolvedValue({ removed: 4, failed: [] });
+    const cancelTask = vi.spyOn(api, 'cancelTask');
+
+    await useQueueStore.getState().clearInactive();
+
+    expect(clearInactive).toHaveBeenCalledTimes(1);
+    expect(cancelTask).not.toHaveBeenCalled();
+    expect(lastToast()?.message).toContain('已清空 4 个未激活任务');
+  });
+
+  it('重试保存成功给出成功提示并只调用 retry_persistence', async () => {
+    const retryPersistence = vi.spyOn(api, 'retryPersistence').mockResolvedValue(undefined);
+
+    await useQueueStore.getState().retryPersistence();
+
+    expect(retryPersistence).toHaveBeenCalledTimes(1);
+    expect(lastToast()).toEqual(
+      expect.objectContaining({ kind: 'success', message: expect.stringContaining('重试保存') }),
+    );
+  });
+
+  it('重试保存失败保留可读错误', async () => {
+    vi.spyOn(api, 'retryPersistence').mockRejectedValue({
+      kind: 'disk',
+      message: 'database is locked',
+      actions: [],
+    });
+
+    await useQueueStore.getState().retryPersistence();
+
+    const toast = lastToast();
+    expect(toast?.kind).toBe('error');
+    expect(toast?.message).toContain('database is locked');
   });
 });

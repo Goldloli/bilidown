@@ -1,5 +1,23 @@
 import type { EnqueueSelection, ParseItem, ParseResult, Settings } from './types';
 
+/**
+ * 是否需要进入「添加确认」面板（design D6 / tasks 6.1）。
+ *
+ * 只依据「解析出的内容数」与「每项实际条目总数」判断：
+ * · 单内容单条目 → 快速添加，不弹确认；
+ * · 多内容（多链接 / 合集拆出的多条）→ 必须确认；
+ * · 任一项实际包含多个分 P / 剧集 / 章节 / 曲目 → 必须确认。
+ *
+ * 特别注意：不能用默认勾选数量代替条目总数。番剧/课程默认只选当前集、
+ * 多 P 链接带 `p=N` 时默认也只选一个，但解析结果实际包含多个条目，
+ * 仍然必须让用户确认，且不擅自把其他条目全选。
+ */
+export function requiresAddConfirmation(
+  items: ReadonlyArray<{ entries: ReadonlyArray<unknown> }>,
+): boolean {
+  return items.length > 1 || (items[0]?.entries.length ?? 0) > 1;
+}
+
 export interface DefaultSelectionIssue {
   code: 'fixed-quality-unavailable';
   message: string;

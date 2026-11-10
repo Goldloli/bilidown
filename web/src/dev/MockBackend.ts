@@ -4,6 +4,7 @@ import type {
   AddOptionsDTO,
   AddTasksResultDTO,
   AppInfoDTO,
+  ClearOutcomeDTO,
   ContractLoginStatus,
   HistoryEntryDTO,
   HistoryFilterDTO,
@@ -47,6 +48,7 @@ export class MockBackend implements Backend {
   private loginStatus: ContractLoginStatus = 'waiting';
   private revision = 0;
   private scenario = devParams().scenario;
+  private quitAttempts = 0;
 
   constructor() {
     this.tasks = this.seedTasks();
@@ -113,6 +115,18 @@ export class MockBackend implements Backend {
       }
       case 'errors':
         return errorTasks();
+      case 'persist-error': {
+        const tasks = queueTasks();
+        const downloading = tasks.find((task) => task.id === 'task-dl');
+        if (downloading) {
+          downloading.persistError = '任务记录保存失败：database is locked';
+        }
+        const done = tasks.find((task) => task.id === 'task-done');
+        if (done) {
+          done.persistError = '历史记录写入失败：disk I/O error';
+        }
+        return tasks;
+      }
       default:
         return queueTasks();
     }
@@ -291,7 +305,15 @@ export class MockBackend implements Backend {
     window.location.hash = '#/preferences';
   };
 
-  quitApp = async (): Promise<void> => {};
+  quitApp = async (): Promise<void> => {
+    // 开发场景演示「退出前保存失败」：第一次失败，重试后成功（真实后端由 shell 决定）
+    if (this.scenario === 'quit-failure' && this.quitAttempts === 0) {
+      this.quitAttempts += 1;
+      throw { kind: 'disk', message: '任务状态保存失败：database is locked', actions: ['retry'] };
+    }
+  };
+
+  forceQuitApp = async (): Promise<void> => {};
 
   getDiagnostics = async (): Promise<string> =>
     `bilidown 2.0.0 (mock)\nmacOS 27.0.1 arm64\n队列：${this.tasks.length} 项\n最近错误：登录已失效`;
@@ -311,6 +333,26 @@ export class MockBackend implements Backend {
     ) {
       const item = addPanelParseResult().items[0];
       const dto = { ...A.parseResultToDTO(item), rawInput: trimmed };
+      this.parseCache.set(trimmed, dto);
+      return dto;
+    }
+    if (this.scenario === 'add-multi-p') {
+      // 多 P/番剧：实际 12 个条目，但默认只勾选当前集（第 1 集）
+      const dto: ParseResultDTO = {
+        kind: 'bangumi',
+        sourceId: 'ss-multi-p',
+        title: '《孤独摇滚！》全 12 话',
+        coverUrl: '/covers/cover-02.svg',
+        pageUrl: trimmed.startsWith('http') ? trimmed : 'https://www.bilibili.com/bangumi/play/ss41410',
+        owner: '孤独摇滚制作委员会',
+        rawInput: trimmed,
+        entries: Array.from({ length: 12 }, (_, index) => ({
+          index,
+          title: `第 ${String(index + 1).padStart(2, '0')} 话`,
+          durationSecs: 1420,
+          selectedDefault: index === 0,
+        })),
+      };
       this.parseCache.set(trimmed, dto);
       return dto;
     }
@@ -506,21 +548,32 @@ export class MockBackend implements Backend {
     return count;
   };
 
-  clearFinished = async (): Promise<number> => {
+  clearFinished = async (): Promise<ClearOutcomeDTO> => {
     const removed = this.tasks.filter((task) => task.status === 'completed').map((task) => task.id);
     this.tasks = this.tasks.filter((task) => task.status !== 'completed');
     this.emitSnapshot();
     for (const id of removed) this.emitTaskEvent(id, 'removed');
-    return removed.length;
+    return { removed: removed.length, failed: [] };
   };
 
-  clearInactive = async (): Promise<number> => {
+  clearInactive = async (): Promise<ClearOutcomeDTO> => {
     const inactive: TaskStatus[] = ['queued', 'paused', 'cancelled'];
     const removed = this.tasks.filter((task) => inactive.includes(task.status)).map((task) => task.id);
     this.tasks = this.tasks.filter((task) => !inactive.includes(task.status));
     this.emitSnapshot();
     for (const id of removed) this.emitTaskEvent(id, 'removed');
-    return removed.length;
+    return { removed: removed.length, failed: [] };
+  };
+
+  retryPersistence = async (): Promise<void> => {
+    let cleared = 0;
+    for (const task of this.tasks) {
+      if (task.persistError) {
+        task.persistError = null;
+        cleared += 1;
+      }
+    }
+    if (cleared > 0) this.emitSnapshot();
   };
 
   // ---- 账户 / 登录 ----
@@ -694,6 +747,10 @@ export class MockBackend implements Backend {
       case 'add-link':
         base.panel = 'add-link';
         break;
+      case 'add-multi-p':
+        // 默认只勾选当前集的多条目内容：解析后仍应进入确认面板（design D6/6.2）
+        base.panel = 'add-link';
+        break;
       case 'add-panel':
       case 'add-panel-preferences':
       case 'add-panel-no-fallback':
@@ -727,6 +784,11 @@ export class MockBackend implements Backend {
           message: '登录已失效，请重新扫码后重试',
           actionLabel: '重新登录',
         });
+        break;
+      case 'quit-failure':
+        // 场景直接展示「保存失败」对话框；把首次失败记为已发生，重试保存即可成功演示
+        this.quitAttempts = 1;
+        base.quitFailure = '任务状态保存失败：database is locked';
         break;
       default:
         break;

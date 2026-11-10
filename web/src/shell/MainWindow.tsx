@@ -7,6 +7,7 @@ import { useQueueStore } from '../stores/useQueueStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { useUiStore } from '../stores/useUiStore';
 import { ConfirmDialogHost } from '../components/ConfirmDialog';
+import { QuitFailureDialogHost } from '../components/QuitFailureDialog';
 import { Icon } from '../components/Icon';
 import { QueueRowSkeleton } from '../components/Skeleton';
 import { ToastViewport } from '../components/Toast';
@@ -123,6 +124,7 @@ export function MainWindow() {
       <ContextMenuHost />
       <ToastViewport />
       <ConfirmDialogHost />
+      <QuitFailureDialogHost />
     </div>
   );
 }

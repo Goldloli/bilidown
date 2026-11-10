@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { t } from '../i18n/zh-CN';
 import { api } from '../lib/ipc';
+import { errorMessageOf } from '../lib/errors';
 import type { EnqueueSelection } from '../lib/ipc';
 import {
   buildDefaultSelectionPlan,
@@ -8,7 +9,14 @@ import {
 } from '../lib/addSelection';
 import { formatBytes, formatDateTime, formatDuration } from '../lib/format';
 import { kindIcon, kindLabel } from '../lib/media';
-import type { AudioFormatId, CodecId, ParseItem, ParseResult, QualityOption } from '../lib/types';
+import type {
+  AudioFormatId,
+  CodecId,
+  EnqueueFailure,
+  ParseItem,
+  ParseResult,
+  QualityOption,
+} from '../lib/types';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { useUiStore } from '../stores/useUiStore';
 import { Button } from '../components/Button';
@@ -97,6 +105,9 @@ export function AddPanel({
   );
   const [outputDir, setOutputDir] = useState(initialPlan?.selection.outputDir ?? '');
   const [submitting, setSubmitting] = useState(false);
+  // 按内容记录入队结果：成功的条目不重复提交，失败的保留并只重试失败内容（design D8/6.4）
+  const [failedItems, setFailedItems] = useState<EnqueueFailure[]>([]);
+  const [doneItemIds, setDoneItemIds] = useState<string[]>([]);
 
   useEffect(() => {
     if (!settings || !initialPlan || defaultsApplied.current) return;
@@ -115,21 +126,25 @@ export function AddPanel({
   const allSelected = active ? activeSelected.length === active.entries.length : false;
   const someSelected = activeSelected.length > 0 && !allSelected;
 
-  const totalCount = useMemo(
+  const pendingItems = useMemo(
     () =>
-      items.reduce(
-        (sum, item) => sum + (selected[item.id]?.length ?? 0),
-        0,
+      items.filter(
+        (item) => (selected[item.id]?.length ?? 0) > 0 && !doneItemIds.includes(item.id),
       ),
-    [items, selected],
+    [items, selected, doneItemIds],
+  );
+  const pendingCount = useMemo(
+    () => pendingItems.reduce((sum, item) => sum + (selected[item.id]?.length ?? 0), 0),
+    [pendingItems, selected],
   );
   const blockingQualityIssues = useMemo(
     () =>
       items.flatMap((item) => {
+        if (doneItemIds.includes(item.id)) return [];
         const issue = qualityIssues[item.id];
         return (selected[item.id]?.length ?? 0) > 0 && issue ? [issue] : [];
       }),
-    [items, qualityIssues, selected],
+    [items, qualityIssues, selected, doneItemIds],
   );
   const activeQualityIssue = active ? qualityIssues[active.id] : undefined;
   const activeBytes = useMemo(
@@ -162,18 +177,16 @@ export function AddPanel({
   };
 
   const submit = async () => {
-    if (!settings || totalCount === 0 || blockingQualityIssues.length > 0) return;
-    if (totalCount > 30) {
+    if (!settings || pendingCount === 0 || blockingQualityIssues.length > 0) return;
+    if (pendingCount > 30) {
       const ok = await confirm({
         title: '下载数量较多',
-        body: `本次将下载 ${totalCount} 个文件，短时间大量请求可能触发 B 站风控，建议分批下载。`,
+        body: `本次将下载 ${pendingCount} 个文件，短时间大量请求可能触发 B 站风控，建议分批下载。`,
         confirmLabel: '继续下载',
       });
       if (!ok) return;
     }
-    const itemIds = items
-      .filter((item) => (selected[item.id]?.length ?? 0) > 0)
-      .map((item) => item.id);
+    const itemIds = pendingItems.map((item) => item.id);
     const selection: EnqueueSelection = {
       itemIds,
       entries: selected,
@@ -184,16 +197,35 @@ export function AddPanel({
       outputDir,
     };
     setSubmitting(true);
+    setFailedItems([]);
     try {
-      const ids = await api.enqueue(parse, selection);
-      pushToast({ kind: 'success', message: t('toast.tasksAdded', { n: ids.length }) });
+      const outcome = await api.enqueue(parse, selection);
+      if (outcome.succeededItemIds.length > 0) {
+        setDoneItemIds((prev) => [...new Set([...prev, ...outcome.succeededItemIds])]);
+      }
+      if (outcome.failures.length > 0) {
+        // 部分失败：保留已成功内容，只对失败内容提供重试
+        setFailedItems(outcome.failures);
+        pushToast({
+          kind: outcome.taskIds.length > 0 ? 'warning' : 'error',
+          message:
+            outcome.taskIds.length > 0
+              ? t('add.partial.summary', {
+                  added: outcome.taskIds.length,
+                  failed: outcome.failures.length,
+                })
+              : outcome.failures[0].message,
+        });
+        return;
+      }
+      pushToast({ kind: 'success', message: t('toast.tasksAdded', { n: outcome.taskIds.length }) });
       setView('queue');
       onClose();
     } catch (error) {
       pushToast({
         kind: 'error',
         message: t('add.submitError', {
-          message: error instanceof Error ? error.message : String(error),
+          message: errorMessageOf(error),
         }),
       });
     } finally {
@@ -443,12 +475,44 @@ export function AddPanel({
             ))}
           </div>
         )}
+        {failedItems.length > 0 && (
+          <div
+            className="mt-4 rounded-card border border-line p-3"
+            style={{ background: 'var(--danger-weak)' }}
+            role="alert"
+          >
+            <div className="flex items-center gap-1.5 text-2xs font-medium text-danger">
+              <Icon name="warning" size={12} />
+              {t('add.partial.title')}
+              <span className="text-fg3">· {failedItems.length} 项</span>
+            </div>
+            {failedItems.map((failure) => (
+              <p key={failure.itemId} className="mt-1 flex gap-1 truncate text-2xs text-fg2">
+                <span className="truncate text-fg3">{failure.title}</span>
+                <span className="shrink-0 text-fg3">—</span>
+                <span className="shrink-0">{failure.message}</span>
+              </p>
+            ))}
+            <div className="mt-2">
+              <Button
+                size="sm"
+                variant="primary"
+                icon="refresh"
+                loading={submitting}
+                onClick={() => void submit()}
+              >
+                {t('add.partial.retry', { n: failedItems.length })}
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex shrink-0 items-center justify-between border-t border-line px-5 py-3">
         <div className="min-w-0">
           <span className="num block text-2xs text-fg2">
-            共 {totalCount} 项，将下载 {totalCount} 个文件
+            {doneItemIds.length > 0 ? `已成功 ${doneItemIds.length} 个内容 · ` : ''}
+            共 {pendingCount} 项，将下载 {pendingCount} 个文件
             {activeBytes > 0 ? ` · 当前条目约 ${formatBytes(activeBytes)}` : ''}
           </span>
           {blockingQualityIssues[0] && (
@@ -464,10 +528,10 @@ export function AddPanel({
           <Button
             variant="primary"
             loading={submitting}
-            disabled={totalCount === 0 || blockingQualityIssues.length > 0}
+            disabled={pendingCount === 0 || blockingQualityIssues.length > 0}
             onClick={() => void submit()}
           >
-            {t('add.confirm', { n: totalCount })}
+            {t('add.confirm', { n: pendingCount })}
           </Button>
         </div>
       </div>

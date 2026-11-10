@@ -8,6 +8,7 @@ import {
   settingsToDTO,
   snapshotFromDTO,
   taskFromDTO,
+  taskToDTO,
 } from '../src/lib/adapt';
 import type {
   HistoryEntryDTO,
@@ -97,6 +98,17 @@ describe('adapt：契约 DTO ↔ UI 模型', () => {
     );
     expect(task.error?.kind).toBe('auth');
     expect(task.error?.actions).toEqual(['relogin']);
+  });
+
+  it('persistError 映射到内部模型并可往返（design D8/3.8）', () => {
+    const task = taskFromDTO(
+      makeTaskDTO({ status: 'done', persistError: '任务记录保存失败：database is locked' }),
+    );
+    expect(task.persistError).toBe('任务记录保存失败：database is locked');
+    expect(taskToDTO(task).persistError).toBe('任务记录保存失败：database is locked');
+
+    const clean = taskFromDTO(makeTaskDTO());
+    expect(clean.persistError).toBeNull();
   });
 
   it('QueueSnapshotDTO → 内部分类统计与账号能力', () => {

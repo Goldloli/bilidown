@@ -147,11 +147,35 @@ export interface QueueTask {
   artifactCoverage?: ArtifactCoverage;
   /** 下载产物（可选；真实模式待 contract/adapt 接线） */
   extras?: TaskExtras;
+  /** 任务记录保存失败的可读原因；null/undefined = 已可靠保存（design D8/3.8） */
+  persistError?: string | null;
   error: TaskError | null;
   /** 从上次退出恢复 */
   restored: boolean;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 批量清理结果（clear_finished / clear_inactive） */
+export interface ClearOutcome {
+  removed: number;
+  /** 删除失败、仍保留在队列中的任务 id */
+  failed: string[];
+}
+
+/** 单个内容入队失败（design D8/6.4：按内容记录成功/失败，重试只提交失败内容） */
+export interface EnqueueFailure {
+  itemId: string;
+  title: string;
+  message: string;
+}
+
+/** 一次确认可能拆成多个独立 add_tasks 请求的结果 */
+export interface EnqueueOutcome {
+  taskIds: string[];
+  /** 已成功入队的内容 id；重试时不得重复提交 */
+  succeededItemIds: string[];
+  failures: EnqueueFailure[];
 }
 
 export interface QueueStats {

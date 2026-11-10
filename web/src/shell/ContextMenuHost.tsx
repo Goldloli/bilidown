@@ -1,6 +1,8 @@
 import { t } from '../i18n/zh-CN';
 import { api } from '../lib/ipc';
 import { isPending, pendingLabel } from '../lib/capabilities';
+import { errorMessageOf } from '../lib/errors';
+import { taskFileTarget } from '../lib/fileAccess';
 import { copyLink, handleParseText } from '../lib/actions';
 import { useHistoryStore } from '../stores/useHistoryStore';
 import { useQueueStore } from '../stores/useQueueStore';
@@ -20,6 +22,7 @@ export function ContextMenuHost() {
   const resume = useQueueStore((s) => s.resume);
   const cancel = useQueueStore((s) => s.cancel);
   const retry = useQueueStore((s) => s.retry);
+  const retryPersistence = useQueueStore((s) => s.retryPersistence);
   const remove = useQueueStore((s) => s.remove);
   const history = useHistoryStore((s) => s.entries);
   const deleteEntry = useHistoryStore((s) => s.deleteEntry);
@@ -63,17 +66,41 @@ export function ContextMenuHost() {
       });
     }
     if (completed) {
+      const target = taskFileTarget(task);
       items.push({
         label: pendingLabel('reveal', t('context.reveal')),
         icon: <Icon name="reveal" size={14} />,
         disabled: isPending('reveal'),
-        onSelect: () => void api.openInFinder(task.outputPath ?? ''),
+        onSelect: () => {
+          if (!target.available) {
+            pushToast({ kind: 'warning', message: target.reason ?? t('file.missing') });
+            return;
+          }
+          void api.openInFinder(target.path).catch((error) => {
+            pushToast({ kind: 'error', message: t('file.revealFailed', { message: errorMessageOf(error) }) });
+          });
+        },
       });
       items.push({
         label: pendingLabel('open-file', t('context.open')),
         icon: <Icon name="external" size={14} />,
         disabled: isPending('open-file'),
-        onSelect: () => void api.openFile(task.outputPath ?? ''),
+        onSelect: () => {
+          if (!target.available) {
+            pushToast({ kind: 'warning', message: target.reason ?? t('file.missing') });
+            return;
+          }
+          void api.openFile(target.path).catch((error) => {
+            pushToast({ kind: 'error', message: t('file.openFailed', { message: errorMessageOf(error) }) });
+          });
+        },
+      });
+    }
+    if (task.persistError) {
+      items.push({
+        label: t('persist.retry'),
+        icon: <Icon name="refresh" size={14} />,
+        onSelect: () => void retryPersistence(),
       });
     }
     items.push({ type: 'separator' });
@@ -113,14 +140,30 @@ export function ContextMenuHost() {
     items.push({
       label: pendingLabel('reveal', t('context.reveal')),
       icon: <Icon name="reveal" size={14} />,
-      disabled: missing || isPending('reveal'),
-      onSelect: () => void api.openInFinder(entry.outputPath),
+      disabled: isPending('reveal'),
+      onSelect: () => {
+        if (missing) {
+          pushToast({ kind: 'warning', message: t('history.missing') });
+          return;
+        }
+        void api.openInFinder(entry.outputPath).catch((error) => {
+          pushToast({ kind: 'error', message: t('file.revealFailed', { message: errorMessageOf(error) }) });
+        });
+      },
     });
     items.push({
       label: pendingLabel('open-file', t('context.open')),
       icon: <Icon name="external" size={14} />,
-      disabled: missing || isPending('open-file'),
-      onSelect: () => void api.openFile(entry.outputPath),
+      disabled: isPending('open-file'),
+      onSelect: () => {
+        if (missing) {
+          pushToast({ kind: 'warning', message: t('history.missing') });
+          return;
+        }
+        void api.openFile(entry.outputPath).catch((error) => {
+          pushToast({ kind: 'error', message: t('file.openFailed', { message: errorMessageOf(error) }) });
+        });
+      },
     });
     items.push({
       label: pendingLabel('redownload', t('context.redownload')),

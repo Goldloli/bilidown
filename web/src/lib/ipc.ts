@@ -4,6 +4,7 @@ import type {
   AddOptionsDTO,
   AddTasksResultDTO,
   AppInfoDTO,
+  ClearOutcomeDTO,
   ContractHistoryStatus,
   HistoryEntryDTO,
   HistoryFilterDTO,
@@ -17,6 +18,9 @@ import type {
 } from './contract';
 import type {
   AccountState,
+  ClearOutcome,
+  EnqueueFailure,
+  EnqueueOutcome,
   EnqueueSelection,
   HistoryEntry,
   HistoryQuery,
@@ -43,6 +47,8 @@ import {
   snapshotFromDTO,
   validateSettings,
 } from './adapt';
+import { requiresAddConfirmation } from './addSelection';
+import { errorMessageOf } from './errors';
 import { readGlassPref } from './glass';
 
 export type { ContractEventName };
@@ -54,7 +60,10 @@ export type { ContractEventName };
 export interface Backend {
   getAppInfo(): Promise<AppInfoDTO>;
   openPreferences(): Promise<void>;
+  /** 保存失败时 reject（AppError），不再总是退出；前端提供重试/仍然退出（design D8/3.9） */
   quitApp(): Promise<void>;
+  /** 用户明确放弃未保存状态后强制退出 */
+  forceQuitApp(): Promise<void>;
   getDiagnostics(): Promise<string>;
 
   parseInput(input: string): Promise<ParseResultDTO>;
@@ -68,8 +77,10 @@ export interface Backend {
   startAll(): Promise<number>;
   pauseAll(): Promise<number>;
   retryAll(): Promise<number>;
-  clearFinished(): Promise<number>;
-  clearInactive(): Promise<number>;
+  clearFinished(): Promise<ClearOutcomeDTO>;
+  clearInactive(): Promise<ClearOutcomeDTO>;
+  /** 仅重试待保存动作（记录/完成事务/历史），不清空产物、不重新下载 */
+  retryPersistence(): Promise<void>;
 
   getAccount(): Promise<AccountInfoDTO | null>;
   loginStart(): Promise<LoginStartDTO>;
@@ -113,15 +124,14 @@ export interface ScenarioBootstrap {
   taskId?: string;
   category?: string;
   notices?: import('./types').AppNotice[];
+  /** 退出保存失败弹窗（dev QA 场景） */
+  quitFailure?: string;
 }
 
 export type { EnqueueSelection };
 
-function errorMessage(error: unknown): string {
-  if (error && typeof error === 'object' && 'message' in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return error instanceof Error ? error.message : String(error);
+function clearOutcome(dto: ClearOutcomeDTO): ClearOutcome {
+  return { removed: dto?.removed ?? 0, failed: dto?.failed ?? [] };
 }
 
 /** 高层客户端：契约命令 + UI 适配（stores 只依赖这一层） */
@@ -156,11 +166,12 @@ class ApiClient {
   cancelTask = (taskId: string) => this.b().cancelTask(taskId);
   retryTask = (taskId: string) => this.b().retryTask(taskId);
   removeTask = (taskId: string) => this.b().removeTask(taskId);
+  retryPersistence = () => this.b().retryPersistence();
   pauseAll = () => this.b().pauseAll();
   resumeAll = () => this.b().startAll();
   retryFailed = () => this.b().retryAll();
-  clearCompleted = () => this.b().clearFinished();
-  cancelAllQueued = () => this.b().clearInactive();
+  clearCompleted = async (): Promise<ClearOutcome> => clearOutcome(await this.b().clearFinished());
+  clearInactive = async (): Promise<ClearOutcome> => clearOutcome(await this.b().clearInactive());
 
   // ---- 解析 / 入队 ----
   parseLinks = async (text: string): Promise<ParseResult> => {
@@ -177,23 +188,28 @@ class ApiClient {
         const dto = await this.b().parseInput(input);
         items.push(...parseResultFromDTO(dto, account).items);
       } catch (error) {
-        failures.push({ raw: input, reason: errorMessage(error) });
+        failures.push({ raw: input, reason: errorMessageOf(error) });
       }
     }
     return {
       items,
       failures,
-      requiresConfirmation:
-        items.length > 1 ||
-        items.some((item) => item.entries.filter((entry) => entry.selectedByDefault).length > 1),
+      requiresConfirmation: requiresAddConfirmation(items),
     };
   };
 
-  enqueue = async (parse: ParseResult, selection: EnqueueSelection): Promise<string[]> => {
+  /**
+   * 按内容分别入队（design D8/6.4）：一次确认可能拆成多个独立 add_tasks 请求。
+   * 单个请求失败不影响其他内容的结果；返回逐内容成功/失败，供 UI 只重试失败内容。
+   */
+  enqueue = async (parse: ParseResult, selection: EnqueueSelection): Promise<EnqueueOutcome> => {
     const taskIds: string[] = [];
+    const succeededItemIds: string[] = [];
+    const failures: EnqueueFailure[] = [];
     for (const item of parse.items) {
       if (!selection.itemIds.includes(item.id)) continue;
       const selectedIds = selection.entries[item.id];
+      // 明确清空的内容不创建任务，也不回落到默认选择
       if (selectedIds?.length === 0) continue;
       const entryIndexes =
         selectedIds === undefined
@@ -212,10 +228,24 @@ class ApiClient {
         entryIndexes,
         note: selection.note,
       };
-      const result = await this.b().addTasks(item.rawInput ?? item.pageUrl, options);
-      taskIds.push(...result.taskIds);
+      try {
+        const result = await this.b().addTasks(item.rawInput ?? item.pageUrl, options);
+        taskIds.push(...result.taskIds);
+        if (result.taskIds.length > 0 || result.rejected.length === 0) {
+          succeededItemIds.push(item.id);
+        }
+        if (result.rejected.length > 0 && result.taskIds.length === 0) {
+          failures.push({
+            itemId: item.id,
+            title: item.title,
+            message: result.rejected.map((rejected) => rejected.reason).join('；'),
+          });
+        }
+      } catch (error) {
+        failures.push({ itemId: item.id, title: item.title, message: errorMessageOf(error) });
+      }
     }
-    return taskIds;
+    return { taskIds, succeededItemIds, failures };
   };
 
   // ---- 设置 ----
@@ -306,6 +336,7 @@ class ApiClient {
       pass: network.proxyPass,
     });
   quitApp = () => this.b().quitApp();
+  forceQuitApp = () => this.b().forceQuitApp();
   requestQuitCheck = () => this.b().requestQuitCheck();
   getAppInfo = () => this.b().getAppInfo();
   getMenuState = () => this.b().getMenuState();

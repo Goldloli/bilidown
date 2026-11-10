@@ -1,4 +1,5 @@
 import { api } from './ipc';
+import { errorMessageOf } from './errors';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { useUiStore } from '../stores/useUiStore';
 import type { ParseResult } from './types';
@@ -57,16 +58,30 @@ export async function handleParseText(text: string): Promise<ParseResult | null>
       ui.pushToast({ kind: 'warning', message: '没有可下载的条目' });
       return null;
     }
-    const ids = await api.enqueue(result, plan.selection);
+    const outcome = await api.enqueue(result, plan.selection);
+    if (outcome.failures.length > 0) {
+      // 快速添加通常只有一条内容，但保留逐内容成功/失败语义（design D8/6.4）
+      ui.pushToast({
+        kind: outcome.taskIds.length > 0 ? 'warning' : 'error',
+        message:
+          outcome.taskIds.length > 0
+            ? t('add.partial.summary', {
+                added: outcome.taskIds.length,
+                failed: outcome.failures.length,
+              })
+            : outcome.failures[0].message,
+      });
+      return result;
+    }
     ui.pushToast({
       kind: 'success',
-      message: t('toast.tasksAdded', { n: ids.length }),
+      message: t('toast.tasksAdded', { n: outcome.taskIds.length }),
     });
     return result;
   } catch (error) {
     ui.pushToast({
       kind: 'error',
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessageOf(error),
     });
     return null;
   }

@@ -99,6 +99,17 @@ export interface TaskDTO {
     subtitleError: string | null;
     coverError: string | null;
   };
+  /**
+   * 记录保存失败的可读原因（design D8/3.8）；null/省略 = 已可靠保存。
+   * 非空时界面需提供「重试保存」（retry_persistence），且不得宣称该任务已可靠记录。
+   */
+  persistError?: string | null;
+}
+
+/** 批量清理结果：真实移除数量 + 删除失败、仍保留在队列中的任务 id（design D2/3.5） */
+export interface ClearOutcomeDTO {
+  removed: number;
+  failed: string[];
 }
 
 export interface QueueStatsDTO {

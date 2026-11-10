@@ -7,6 +7,7 @@ export type ScenarioKey =
   | 'states'
   | 'bulk'
   | 'add-link'
+  | 'add-multi-p'
   | 'add-panel'
   | 'add-panel-preferences'
   | 'add-panel-no-fallback'
@@ -24,6 +25,8 @@ export type ScenarioKey =
   | 'history-artifacts'
   | 'history-legacy'
   | 'history-empty'
+  | 'persist-error'
+  | 'quit-failure'
   | 'errors';
 
 export type RouteName = 'main' | 'preferences' | 'gallery';
