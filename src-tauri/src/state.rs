@@ -1035,6 +1035,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn download_client_routes_subsequent_requests_through_proxy() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        // 本地 HTTP 代理：记录请求行并直接应答（不转发），证明请求确实经由代理发出。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 2048];
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let first_line = request.lines().next().unwrap_or_default().to_string();
+                let _ = tx.send(first_line);
+                let body = b"proxied";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+            }
+        });
+        let client =
+            bilidown_core::api::client::download_client(Some(&format!("http://{proxy_addr}")))
+                .unwrap();
+        let response = client
+            .get("http://proxy-probe.invalid/data")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.text().await.unwrap(), "proxied");
+        let first_line = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("代理未收到请求");
+        assert!(
+            first_line.starts_with("GET http://proxy-probe.invalid/data"),
+            "后续请求未使用新代理: {first_line}"
+        );
+    }
+
+    #[tokio::test]
     async fn update_settings_persists_proxy_change_without_blocking() {
         let dir = unique_dir("proxy");
         let core = test_core(&dir).await;
@@ -1042,6 +1085,8 @@ mod tests {
         let mut creds = core.storage.load_credentials();
         creds.cookies = vec![("SESSDATA".to_string(), "session-value".to_string())];
         core.storage.save_credentials(&creds).unwrap();
+        // 记录切换前的 client 实例：新配置必须替换为独立实例（旧请求结果不能回写新配置）。
+        let previous_client = core.client();
         let revision = core
             .update_settings(|current| {
                 let mut next = current.clone();
@@ -1059,9 +1104,14 @@ mod tests {
             core.storage.load_settings().proxy.as_deref(),
             Some("http://127.0.0.1:7897")
         );
+        let current_client = core.client();
+        assert!(
+            !Arc::ptr_eq(&previous_client, &current_client),
+            "代理切换必须重建独立 client，避免旧请求结果回写新配置"
+        );
         // 新 client 继承刚保存的 cookie，不被代理切换清空。
         assert!(
-            core.client()
+            current_client
                 .cookies()
                 .cookies
                 .iter()
