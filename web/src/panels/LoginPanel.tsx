@@ -1,3 +1,4 @@
+import '../i18n/zh-CN.dynamic';
 import { useEffect, useRef } from 'react';
 import { t } from '../i18n/zh-CN';
 import { useAccountStore } from '../stores/useAccountStore';

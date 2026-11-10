@@ -1,3 +1,4 @@
+import '../i18n/zh-CN.dynamic';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { CloseRequestedEvent } from '@tauri-apps/api/window';

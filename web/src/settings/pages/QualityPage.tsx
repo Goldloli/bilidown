@@ -1,3 +1,4 @@
+import '../../i18n/zh-CN.dynamic';
 import { t } from '../../i18n/zh-CN';
 import { api } from '../../lib/ipc';
 import { QUALITY_TIERS } from '../../lib/constants';

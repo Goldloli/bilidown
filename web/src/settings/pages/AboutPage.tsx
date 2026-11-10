@@ -1,3 +1,4 @@
+import '../../i18n/zh-CN.dynamic';
 import { useEffect, useState } from 'react';
 import { t, type StringKey } from '../../i18n/zh-CN';
 import { APP_BUILD, APP_VERSION } from '../../lib/constants';

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { t } from '../i18n/zh-CN';
-import { handleParseText } from '../lib/actions';
 import { retryStartupCore, retryStartupSection } from '../lib/bootstrap';
 import { devParams } from '../dev/scenario';
 import { useAsyncComponent } from '../lib/asyncComponent';
@@ -8,7 +7,6 @@ import { useQueueStore } from '../stores/useQueueStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { useStartupStore } from '../stores/useStartupStore';
 import { useUiStore } from '../stores/useUiStore';
-import { CoreErrorPanel } from '../components/CoreErrorPanel';
 import { Icon } from '../components/Icon';
 import { QueueRowSkeleton } from '../components/Skeleton';
 import { BottomBar } from './BottomBar';
@@ -21,6 +19,8 @@ const loadHistoryView = () =>
 const loadContextMenu = () =>
   import('./ContextMenuHost').then((module) => module.ContextMenuHost);
 const loadOverlayHost = () => import('./OverlayHost').then((module) => module.OverlayHost);
+const loadCoreErrorPanel = () =>
+  import('../components/CoreErrorPanel').then((module) => module.CoreErrorPanel);
 
 export function MainWindow() {
   const snapshot = useQueueStore((s) => s.snapshot);
@@ -39,6 +39,7 @@ export function MainWindow() {
   const contextMenu = useAsyncComponent(loadContextMenu, contextTarget !== null);
   // 覆盖层在首次渲染后立刻异步加载（不阻塞首屏，事件到达前通常已就绪）。
   const overlayHost = useAsyncComponent(loadOverlayHost, true);
+  const coreErrorPanel = useAsyncComponent(loadCoreErrorPanel, coreError !== null);
 
   // 队列分区就绪即渲染本地内容；设置失败不阻塞队列/历史（设置窗口独立展示错误）。
   const ready = Boolean(snapshot) || queueSection.status === 'error';
@@ -91,11 +92,15 @@ export function MainWindow() {
           className="grid min-h-0 flex-1 place-items-center px-8"
           style={{ background: 'var(--bg-content)' }}
         >
-          <CoreErrorPanel
-            message={coreError}
-            retrying={retryingCore}
-            onRetry={() => void retryStartupCore()}
-          />
+          {coreErrorPanel.Page ? (
+            <coreErrorPanel.Page
+              message={coreError}
+              retrying={retryingCore}
+              onRetry={() => void retryStartupCore()}
+            />
+          ) : (
+            <p className="text-[13px]">引擎初始化失败：{coreError}</p>
+          )}
         </main>
       </div>
     );
@@ -136,7 +141,9 @@ export function MainWindow() {
           const text =
             event.dataTransfer.getData('text/plain') ||
             event.dataTransfer.getData('text/uri-list');
-          if (text.trim()) void handleParseText(text);
+          if (text.trim()) {
+            void import('../lib/actions').then(({ handleParseText }) => handleParseText(text));
+          }
         }}
       >
         {settingsSection.status === 'error' && !settings && (

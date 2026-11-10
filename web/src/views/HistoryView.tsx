@@ -1,3 +1,4 @@
+import '../i18n/zh-CN.dynamic';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { t } from '../i18n/zh-CN';

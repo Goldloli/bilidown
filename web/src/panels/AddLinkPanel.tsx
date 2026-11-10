@@ -1,3 +1,4 @@
+import '../i18n/zh-CN.dynamic';
 import { useState } from 'react';
 import { t } from '../i18n/zh-CN';
 import { handleParseText } from '../lib/actions';

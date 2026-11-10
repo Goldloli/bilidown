@@ -1,3 +1,4 @@
+import '../i18n/zh-CN.dynamic';
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { t } from '../i18n/zh-CN';

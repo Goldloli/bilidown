@@ -47,9 +47,6 @@ import {
   type StartupSectionKey,
 } from '../stores/useStartupStore';
 import { clearCoverCache } from './cover';
-import { handleMenuAction } from './menu';
-import { addFromClipboard, handleParseText } from './actions';
-import { attemptQuit } from './quit';
 
 /** `core 初始化失败: …` / `引擎尚未就绪` 等表示整个 core 不可用，需走统一初始化重试。 */
 export function isCoreInitError(message: string | null | undefined): boolean {
@@ -295,7 +292,9 @@ export class StartupCoordinator {
             message: notice.message,
             actionLabel: '一键添加',
             durationMs: 8000,
-            action: () => void addFromClipboard(),
+            action: () => {
+              void import('./actions').then(({ addFromClipboard }) => addFromClipboard());
+            },
           });
           return;
         }
@@ -304,13 +303,16 @@ export class StartupCoordinator {
     );
     keep(
       api.on<MenuActionDTO>(CONTRACT_EVENTS.shellMenu, (action) => {
-        void handleMenuAction(action.id);
+        // 菜单动作模块按需加载（不进入首屏包，tasks 8.3）。
+        void import('./menu').then(({ handleMenuAction }) => handleMenuAction(action.id));
       }),
     );
     keep(
       api.on<DropPayloadDTO>(CONTRACT_EVENTS.shellDrop, (payload) => {
         const text = payload.text || payload.paths.join('\n');
-        if (text.trim()) void handleParseText(text);
+        if (text.trim()) {
+          void import('./actions').then(({ handleParseText }) => handleParseText(text));
+        }
       }),
     );
     keep(
@@ -323,7 +325,10 @@ export class StartupCoordinator {
             confirmLabel: '退出',
           });
           // 保存失败时由 attemptQuit 显示「重试保存 / 仍然退出」；正常退出不额外确认。
-          if (confirmed) await attemptQuit();
+          if (confirmed) {
+            const { attemptQuit } = await import('./quit');
+            await attemptQuit();
+          }
         })();
       }),
     );
