@@ -19,15 +19,19 @@ let client = Arc::new(BiliClient::new(settings.proxy.as_deref(), creds.stored())
 client.apply_device(&creds.device);
 client.activate_buvid().await;                        // 匿名风控凭据（失败仅日志）
 
-// 3) 账号恢复（nav 校验；失败不影响启动）
-let account = account::restore(&client, &storage).await;  // -> AccountState
-account::persist_device(&client, &storage).await.ok();    // 持久化 buvid3/4/_uuid
-
-// 4) 日志（写 <data>/logs/bilidown.log，按天滚动）
+// 3) 日志（写 <data>/logs/bilidown.log，按天滚动）
 bilidown_core::logging::init(&storage.paths().logs_dir(), "info")?;
 
-// 5) TaskManager（自动恢复队列：进行中→Paused，Queued 保持 Queued 并继续调度）
-let manager = TaskManager::start(TaskManagerConfig::new(client.clone(), storage.clone(), settings.clone())).await?;
+// 4) TaskManager（启动分阶段：先恢复队列但暂不调度，网络准备结束后再启用）
+let mut config = TaskManagerConfig::new(client.clone(), storage.clone(), settings.clone());
+config.startup_defer_schedule = true;   // design D5/5.2：本地就绪不等待外网
+let manager = TaskManager::start(config).await?;
+
+// 5) 网络阶段（壳负责 5 秒预算 + 代次保护）：先激活设备/恢复账号，再启用调度
+client.activate_buvid().await;
+let account = account::restore(&client, &storage).await;  // -> AccountState
+account::persist_device(&client, &storage).await.ok();    // 持久化 buvid3/4/_uuid
+manager.enable_scheduling().await?;                       // 无论成功/超时都应最终调用
 let mut snapshot_rx = manager.subscribe_snapshot();   // watch<QueueSnapshot>
 let mut event_rx = manager.subscribe_events();        // broadcast<TaskEvent>
 ```
@@ -37,7 +41,9 @@ let mut event_rx = manager.subscribe_events();        // broadcast<TaskEvent>
 | 类型 | 说明 |
 | --- | --- |
 | `TaskId = String`（UUID） | 队列内所有操作的唯一寻址方式 |
-| `TaskView` | 任务全量视图（serde，可直接 emit 给前端）：id/spec/phase/title/upper/cover_url/page_url/content_kind/entries/selected_entries/progress/speed_bps/output_path/file_size/error/restored/actual_quality/actual_codec/actual_audio/created_at/updated_at |
+| `TaskView` | 任务全量视图（serde，可直接 emit 给前端）：id/spec/phase/title/upper/cover_url/page_url/content_kind/entries/selected_entries/progress/speed_bps/output_path/file_size/error/restored/actual_quality/actual_codec/actual_audio/extras/persist_error/created_at/updated_at |
+| `TaskMetadata` | 版本化持久化元信息（version/upper/entries/selected_entries/actual_*/extras）；tasks 表 `metadata` 列，旧记录 `{}` |
+| `ClearOutcome` | 批量清理结果：`{removed, failed: Vec<TaskId>}`；部分失败行保留在队列 |
 | `QueueSnapshot` | `{ seq, tasks: TaskView[], active_count, queued_count, paused_count, done_count, failed_count, total_speed_bps }`（seq 单调递增，前端可丢弃旧快照） |
 | `TaskExtras` | 可选后处理产物：`{ subtitles: Vec<String>, cover: Option<String>, subtitle_error: Option<String>, cover_error: Option<String> }`；`TaskView.extras` 与 `TaskOutcome.extras` 均为 `#[serde(default)]`（旧数据兼容） |
 | `TaskPhase` | `queued/resolving/downloading/merging/paused/done/failed/cancelled`（serde snake_case） |
@@ -60,12 +66,17 @@ manager.snapshot()           -> QueueSnapshot                    // 当前值
 manager.enqueue(Vec<TaskSpec>) -> Vec<TaskId>
 manager.pause(&str)  manager.resume(&str)  manager.cancel(&str)
 manager.retry(&str)  manager.remove(&str)
-manager.clear_finished() -> usize          // 清空已完成/失败/取消（历史保留）
+manager.clear_finished() -> ClearOutcome   // 清空已完成/失败/取消（历史保留）
+manager.clear_inactive() -> ClearOutcome   // 清空排队/暂停/已取消（actor 内单批确定目标并统一补调度）
 manager.pause_all() -> usize  manager.resume_all() -> usize  manager.retry_all_failed() -> usize
-manager.flush() -> ()                       // 强制落盘（退出前）
+manager.flush() -> ()                       // 强制落盘（退出前；写库失败返回错误）
 manager.set_settings(Settings) -> ()        // 并发/目录/ffmpeg/代理热更新
 manager.set_client(Arc<BiliClient>) -> ()   // 代理变更后重建 client 时调用
-manager.shutdown() -> ()                    // 暂停进行中任务 + flush（⌘Q/退出前必须调用）
+manager.enable_scheduling() -> ()           // 启动分阶段：网络准备结束后启用传输调度
+manager.retry_persistence() -> ()           // 重试待保存动作（完成事务/历史/任务记录）
+manager.prepare_shutdown() -> ()            // 退出准备：暂停 + 保存；失败可重试且不退出
+manager.finalize_shutdown() -> ()           // 最终退出（停止 worker/监督任务）
+manager.shutdown() -> ()                    // 便捷组合：prepare + finalize（⌘Q/退出前必须调用）
 ```
 
 **可选后处理（change add-download-features D2）**：设置开启 `download_subtitle`/`download_cover`
@@ -287,3 +298,20 @@ pub struct Endpoints { pub api: String, pub passport: String, pub www: String } 
 `SessionRefresh::ReloginRequired` → `AccountState.expired=true`，提示「登录已失效，请重新扫码」；
 `SessionRefresh::Failed` → 保持登录态，仅 `cookie_refresh_required=true`（提示「下次启动自动重试/建议重新登录延长有效期」），
 不展示底层协议错误。refresh_token 缺失/被拒（-101/-111/86095）→ 重新扫码；网络/5xx/风控 → 下次再试。
+
+## 9. 可靠性与性能（change improve-client-reliability-and-performance）
+
+- **任务临时数据隔离（D1）**：worker 启动时记录任务实际临时目录（`<cache>/<task-id>` 与
+  `<output>/.bilidown-tmp/<task-id>`）；完成/取消/移除/重试只递归删除目标任务目录，
+  `.bilidown-tmp` 父目录仅空时非递归移除；清理失败记录并排队重试（1s、最多 3 次），不阻塞调度。
+- **移除后持续调度（D2）**：数据库删除成功后才发布移除；运行中任务保留 `tails` 收尾记录，
+  worker 确认结束后统一清理并 `schedule()`；取消/移除后 3 秒收敛监督（`WorkerEvent::Converge`），
+  超时 abort 并确认结束后收尾；已移除任务的迟到事件与产物 checkpoint 不再写回记录。
+- **元信息持久化（D7）**：迁移 `004_task_metadata.sql` 增加 `tasks.metadata`；
+  `TaskView::metadata()/apply_metadata()` 与 `TaskRecord.metadata` 往返；恢复时独立解析，
+  损坏/未知版本只丢元信息，不丢任务、不伪造作者/条目/实际参数/附件。
+- **可靠写库（D8）**：`Db::insert_tasks`（批量入队单事务）、`Db::finish_task`（完成视图 +
+  历史 upsert + 裁剪原子提交）；`persist_view`/`flush_dirty` 失败保留 dirty 并做有界退避；
+  `TaskView.persist_error` 暴露失败原因；`retry_persistence` 只重试记录，不重新下载。
+- **性能（D10）**：`TaskManager` 空闲时不运行定时轮询（按 deadline 唤醒）；进度发布 ≤10Hz；
+  测试可注入 `enqueue_store_fail_once`、`artifact_store_fail_once` 故障。
