@@ -14,7 +14,6 @@ import {
   normalizeAccent,
   readAccentOverride,
   readAccentPref,
-  writeAccentPref,
 } from '../../lib/accent';
 import {
   MOTION_OPTIONS,
@@ -22,7 +21,6 @@ import {
   normalizeMotion,
   readMotionOverride,
   readMotionPref,
-  writeMotionPref,
   type MotionPreference,
 } from '../../lib/motion';
 import { FieldRow } from '../../components/FieldRow';
@@ -63,11 +61,11 @@ export function InterfacePage() {
 
   const chooseAccent = (hex: string) => {
     const value = normalizeAccent(hex);
+    // 即时预览；持久化与显示缓存写入只在后端接受成功后进行（design D4）。
     applyAccent(value);
-    writeAccentPref(value);
     setHexDraft(value);
     setHexError(false);
-    save({ interface: { accentColor: value } });
+    void save({ interface: { accentColor: value } });
   };
 
   const commitHex = () => {
@@ -80,9 +78,9 @@ export function InterfacePage() {
   };
 
   const chooseMotion = (value: MotionPreference) => {
-    writeMotionPref(value);
+    // 即时预览；成功保存后由 Store 覆盖 localStorage 显示缓存。
     applyMotion(value);
-    save({ interface: { motion: value } });
+    void save({ interface: { motion: value } });
   };
 
   return (

@@ -14,6 +14,7 @@ import type {
   ParseResultDTO,
   QueueSnapshotDTO,
   SettingsDTO,
+  SettingsPatchDTO,
   TaskEventDTO,
 } from '../lib/contract';
 import type { Backend, ScenarioBootstrap } from '../lib/ipc';
@@ -47,10 +48,21 @@ export class MockBackend implements Backend {
   private parseCache = new Map<string, ParseResultDTO>();
   private loginStatus: ContractLoginStatus = 'waiting';
   private revision = 0;
+  /** 设置修订号（design D3）：get/patch 响应与 settings://changed 事件一致携带 */
+  private settingsRevision = 0;
+  /** dev QA：?settingsFail=N 让前 N 次保存失败，用于验证保存失败/重试界面 */
+  private settingsPatchFailures = 0;
   private scenario = devParams().scenario;
   private quitAttempts = 0;
 
   constructor() {
+    this.settingsPatchFailures = Math.max(
+      0,
+      Number.parseInt(
+        new URLSearchParams(window.location.search).get('settingsFail') ?? '0',
+        10,
+      ) || 0,
+    );
     this.tasks = this.seedTasks();
     this.account = this.seedAccount();
     this.settings = defaultSettings(devParams().theme);
@@ -223,8 +235,12 @@ export class MockBackend implements Backend {
     this.emit(CONTRACT_EVENTS.accountChanged, A.accountToDTO(this.account));
   }
 
+  private settingsDTO(): SettingsDTO {
+    return A.settingsToDTO(this.settings, this.settingsRevision);
+  }
+
   private emitSettings(): void {
-    this.emit(CONTRACT_EVENTS.settingsChanged, A.settingsToDTO(this.settings));
+    this.emit(CONTRACT_EVENTS.settingsChanged, this.settingsDTO());
   }
 
   private emitHistory(): void {
@@ -632,12 +648,29 @@ export class MockBackend implements Backend {
   };
 
   // ---- 设置 ----
-  getSettings = async (): Promise<SettingsDTO> => A.settingsToDTO(this.settings);
+  getSettings = async (): Promise<SettingsDTO> => this.settingsDTO();
 
   setSettings = async (settings: SettingsDTO): Promise<SettingsDTO> => {
     this.settings = A.settingsFromDTO(settings, this.settings);
+    this.settingsRevision += 1;
     this.emitSettings();
-    return A.settingsToDTO(this.settings);
+    return this.settingsDTO();
+  };
+
+  /** 增量提交（design D3）：省略字段保持不变、null 清空可空字段；Mock 与 Rust 同语义。 */
+  patchSettings = async (patch: SettingsPatchDTO): Promise<SettingsDTO> => {
+    if (this.settingsPatchFailures > 0) {
+      this.settingsPatchFailures -= 1;
+      throw {
+        kind: 'disk',
+        message: '设置保存失败：无法写入设置文件（dev 注入）',
+        actions: ['retry'],
+      };
+    }
+    this.settings = A.applySettingsPatchDTO(this.settings, patch);
+    this.settingsRevision += 1;
+    this.emitSettings();
+    return this.settingsDTO();
   };
 
   // ---- 历史 ----

@@ -13,24 +13,23 @@ import { TextField } from '../../components/TextField';
 import { SettingsGroup, useSettingsForm } from '../form';
 
 export function QualityPage() {
-  const { settings, save, issueFor } = useSettingsForm();
+  const { settings, edit, save, issueFor } = useSettingsForm();
   const pushToast = useUiStore((s) => s.pushToast);
   const quality = settings.quality;
 
+  // 检测结果属于运行态，不作为用户设置提交（design D3）；只给出反馈。
   const detect = () => {
     void api.detectFfmpeg().then((result) => {
-      save({
-        quality: {
-          ffmpegDetected: result.detected,
-          ffmpegVersion: result.version,
-          ffmpegPath: result.path ?? quality.ffmpegPath,
-        },
-      });
       pushToast({
         kind: result.detected ? 'success' : 'warning',
         message: result.detected ? `已检测到 ffmpeg ${result.version ?? ''}` : '未找到 ffmpeg',
       });
     });
+  };
+
+  /** 文本字段：失焦或 Enter 时提交有效补丁（design D4）。 */
+  const commitFfmpegPath = (): void => {
+    void save({ quality: { ffmpegPath: quality.ffmpegPath } });
   };
 
   return (
@@ -39,7 +38,9 @@ export function QualityPage() {
         <FieldRow label={t('settings.quality.strategy')}>
           <SegmentedControl<QualityStrategy>
             value={quality.strategy}
-            onChange={(value) => save({ quality: { strategy: value } })}
+            onChange={(value) =>
+              save({ quality: { strategy: value, fixedQuality: quality.fixedQuality } })
+            }
             ariaLabel={t('settings.quality.strategy')}
             options={[
               { value: 'best', label: t('settings.quality.best') },
@@ -53,7 +54,9 @@ export function QualityPage() {
               <SelectMenu
                 value={String(quality.fixedQuality)}
                 width={170}
-                onChange={(value) => save({ quality: { fixedQuality: Number(value) } })}
+                onChange={(value) =>
+                  save({ quality: { strategy: 'fixed', fixedQuality: Number(value) } })
+                }
                 options={QUALITY_TIERS.map((tier) => ({
                   value: String(tier.id),
                   label: tier.label,
@@ -124,13 +127,23 @@ export function QualityPage() {
           </div>
         </FieldRow>
         <FieldRow label="可执行路径">
-          <TextField
-            value={quality.ffmpegPath}
-            onChange={(value) => save({ quality: { ffmpegPath: value } })}
-            width={300}
-            mono
-            ariaLabel="ffmpeg 路径"
-          />
+          <span
+            onBlur={commitFfmpegPath}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                commitFfmpegPath();
+              }
+            }}
+          >
+            <TextField
+              value={quality.ffmpegPath}
+              onChange={(value) => edit({ quality: { ffmpegPath: value } })}
+              width={300}
+              mono
+              ariaLabel="ffmpeg 路径"
+            />
+          </span>
         </FieldRow>
       </SettingsGroup>
     </div>

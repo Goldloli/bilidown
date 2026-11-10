@@ -16,7 +16,9 @@ export function DownloadPage() {
   const toggle = (
     key: 'downloadSubtitle' | 'downloadCover' | 'checkUpdatesOnStartup',
     checked: boolean,
-  ): void => save({ download: { [key]: checked } });
+  ): void => {
+    void save({ download: { [key]: checked } });
+  };
 
   return (
     <div>

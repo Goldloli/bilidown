@@ -14,6 +14,7 @@ import type {
   ParseResultDTO,
   QueueSnapshotDTO,
   SettingsDTO,
+  SettingsPatchDTO,
   TaskEventDTO,
 } from './contract';
 import type {
@@ -32,7 +33,6 @@ import type {
   QueueTask,
   Settings,
   SettingsPatch,
-  SettingsValidationIssue,
 } from './types';
 import {
   ANONYMOUS_ACCOUNT,
@@ -40,16 +40,15 @@ import {
   historyFromDTO,
   loginChallengeFromDTO,
   loginPollFromDTO,
-  mergeSettings,
   parseResultFromDTO,
   settingsFromDTO,
-  settingsToDTO,
+  settingsPatchToDTO,
+  settingsRevisionOf,
   snapshotFromDTO,
-  validateSettings,
+  type AdaptedSettings,
 } from './adapt';
 import { requiresAddConfirmation } from './addSelection';
 import { errorMessageOf } from './errors';
-import { readGlassPref } from './glass';
 
 export type { ContractEventName };
 
@@ -90,6 +89,8 @@ export interface Backend {
 
   getSettings(): Promise<SettingsDTO>;
   setSettings(settings: SettingsDTO): Promise<SettingsDTO>;
+  /** 增量提交（design D3）；省略字段=保持不变，null=清空可空字段 */
+  patchSettings(patch: SettingsPatchDTO): Promise<SettingsDTO>;
 
   listHistory(filter?: HistoryFilterDTO): Promise<HistoryEntryDTO[]>;
   removeHistory(id: string): Promise<void>;
@@ -137,10 +138,21 @@ function clearOutcome(dto: ClearOutcomeDTO): ClearOutcome {
 /** 高层客户端：契约命令 + UI 适配（stores 只依赖这一层） */
 class ApiClient {
   private backend: Backend | null = null;
-  private lastSettings: Settings | null = null;
+  /** 最近一次被接受的设置（含服务端 revision），仅作前端缓存与补丁基底 */
+  private lastSettings: AdaptedSettings | null = null;
+  /** 已接受的最大设置修订号；-1 表示尚未建立/已重置 */
+  private lastRevision = -1;
 
   setBackend(backend: Backend): void {
     this.backend = backend;
+    // 重新建立后端会话时重置本地修订状态（design D3）。
+    this.lastSettings = null;
+    this.lastRevision = -1;
+  }
+
+  /** 已接受设置的服务端修订号（测试与调试用） */
+  get settingsRevision(): number {
+    return this.lastRevision;
   }
 
   get isReady(): boolean {
@@ -249,26 +261,39 @@ class ApiClient {
   };
 
   // ---- 设置 ----
-  getSettings = async (): Promise<Settings> => {
+
+  /** 按修订号接收设置：更旧的响应/事件不得覆盖较新的已接受值（design D3）。 */
+  private acceptSettings(settings: AdaptedSettings): AdaptedSettings {
+    const revision = settingsRevisionOf(settings);
+    if (revision !== undefined && revision < this.lastRevision) {
+      return this.lastSettings ?? settings;
+    }
+    this.lastSettings = settings;
+    if (revision !== undefined && revision > this.lastRevision) {
+      this.lastRevision = revision;
+    }
+    return settings;
+  }
+
+  /**
+   * 事件/启动读取路径：Store 判定接收后再同步 ApiClient 缓存，
+   * 保证 `lastSettings` 与 Store 始终一致。
+   */
+  applySettingsSnapshot(settings: AdaptedSettings): void {
+    this.acceptSettings(settings);
+  }
+
+  getSettings = async (): Promise<AdaptedSettings> => {
     const dto = await this.b().getSettings();
-    this.lastSettings = settingsFromDTO(dto, this.lastSettings);
-    // 前端 UI 偏好（shell Settings 暂不持久化）
-    this.lastSettings.interface.glassBackground = readGlassPref();
-    return this.lastSettings;
+    return this.acceptSettings(settingsFromDTO(dto, this.lastSettings));
   };
 
-  updateSettings = async (
-    patch: SettingsPatch,
-  ): Promise<{ settings: Settings; issues: SettingsValidationIssue[] }> => {
+  /** 增量提交一个设置补丁；后端已按 patch_settings 原子合并并返回新修订号。 */
+  patchSettings = async (patch: SettingsPatch): Promise<AdaptedSettings> => {
     const base = this.lastSettings ?? (await this.getSettings());
-    const merged = mergeSettings(base, patch);
-    const issues = validateSettings(merged);
-    if (issues.length > 0) {
-      return { settings: base, issues };
-    }
-    const saved = settingsFromDTO(await this.b().setSettings(settingsToDTO(merged)), merged);
-    this.lastSettings = saved;
-    return { settings: saved, issues: [] };
+    const dto = settingsPatchToDTO(patch, base);
+    const saved = settingsFromDTO(await this.b().patchSettings(dto), base);
+    return this.acceptSettings(saved);
   };
 
   // ---- 账户 / 登录 ----

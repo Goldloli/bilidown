@@ -307,6 +307,34 @@ export interface SettingsDTO {
   glassBackground?: boolean;
   ffmpegDetected?: boolean;
   ffmpegVersion?: string | null;
+  /** 进程内单调递增的设置修订号（get/patch/set 响应与 settings://changed 事件都携带） */
+  revision?: number;
+}
+
+/**
+ * 设置增量提交（design D3）：只包含可编辑业务字段。
+ * 省略字段 = 保持不变；`null` = 清空可空字段（downloadDir/ffmpegPath/accentColor）。
+ */
+export interface SettingsPatchDTO {
+  downloadDir?: string | null;
+  maxConcurrent?: number;
+  quality?: string;
+  codec?: string;
+  audioFormat?: string;
+  ffmpegPath?: string | null;
+  proxy?: ProxyDTO;
+  theme?: 'system' | 'light' | 'dark';
+  notifications?: boolean;
+  watchClipboard?: boolean;
+  historyLimit?: number;
+  writeMetadata?: boolean;
+  downloadSubtitle?: boolean;
+  downloadCover?: boolean;
+  checkUpdatesOnStartup?: boolean;
+  accentColor?: string | null;
+  motion?: 'system' | 'reduce' | 'normal';
+  qualityFallback?: boolean;
+  glassBackground?: boolean;
 }
 
 export interface AppInfoDTO {

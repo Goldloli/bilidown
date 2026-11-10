@@ -14,6 +14,7 @@ import type {
   ParseResultDTO,
   QueueSnapshotDTO,
   SettingsDTO,
+  SettingsPatchDTO,
 } from './contract';
 import type { Backend } from './ipc';
 
@@ -62,6 +63,7 @@ export function createTauriBackend(): Backend {
 
     getSettings: () => invoke<SettingsDTO>('get_settings'),
     setSettings: (settings) => invoke<SettingsDTO>('set_settings', { settings }),
+    patchSettings: (patch: SettingsPatchDTO) => invoke<SettingsDTO>('patch_settings', { patch }),
 
     listHistory: (filter?: HistoryFilterDTO) =>
       invoke<HistoryEntryDTO[]>('list_history', { filter }),

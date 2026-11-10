@@ -15,6 +15,7 @@ import type {
   QueueCapabilityDTO,
   QueueSnapshotDTO,
   SettingsDTO,
+  SettingsPatchDTO,
   TaskArtifactDTO,
   TaskDTO,
   TaskProgressDTO,
@@ -638,11 +639,18 @@ function codecPreferenceFrom(value: string): Settings['quality']['codecPreferenc
   return 'avc';
 }
 
-export function settingsFromDTO(dto: SettingsDTO, prev?: Settings | null): Settings {
+/** 前端内部设置 + 服务端修订号（revision 只用于丢弃过期值，不参与设置内容比较） */
+export type AdaptedSettings = Settings & { revision?: number };
+
+export function settingsRevisionOf(settings: Settings | null | undefined): number | undefined {
+  return (settings as AdaptedSettings | null | undefined)?.revision;
+}
+
+export function settingsFromDTO(dto: SettingsDTO, prev?: Settings | null): AdaptedSettings {
   const base = prev ?? defaultInternalSettings();
   const fixedQuality =
     dto.quality === 'best' ? base.quality.fixedQuality : qualityLabelToQn(dto.quality);
-  return {
+  const settings: Settings = {
     general: {
       ...base.general,
       notifyOnComplete: dto.notifications,
@@ -691,14 +699,15 @@ export function settingsFromDTO(dto: SettingsDTO, prev?: Settings | null): Setti
       proxyPass: dto.proxy.pass ?? '',
     },
   };
+  return { ...settings, revision: dto.revision };
 }
 
-export function settingsToDTO(settings: Settings): SettingsDTO {
+export function settingsToDTO(settings: Settings, revision?: number): SettingsDTO {
   const quality =
     settings.quality.strategy === 'best'
       ? 'best'
       : (QUALITY_TIERS.find((tier) => tier.id === settings.quality.fixedQuality)?.label ?? '1080P');
-  return {
+  const dto: SettingsDTO = {
     downloadDir: settings.download.outputDir,
     maxConcurrent: settings.download.maxConcurrent,
     quality,
@@ -735,9 +744,160 @@ export function settingsToDTO(settings: Settings): SettingsDTO {
     ffmpegDetected: settings.quality.ffmpegDetected,
     ffmpegVersion: settings.quality.ffmpegVersion,
   };
+  if (revision !== undefined) dto.revision = revision;
+  return dto;
 }
 
-/** 前端侧校验（契约 set_settings 只返回 invalid-argument，这里提前给出字段级错误） */
+function qualityLabelFor(fixedQuality: number): string {
+  return QUALITY_TIERS.find((tier) => tier.id === fixedQuality)?.label ?? '1080P';
+}
+
+/**
+ * SettingsPatch（内部结构）→ `SettingsPatchDTO`（design D3）：
+ * 只映射补丁显式包含的业务字段；运行态字段（ffmpegDetected/ffmpegVersion 等）不会提交。
+ * `base` 用于补全「部分字段补丁」需要的当前值（如 quality 档位、代理其余字段）。
+ */
+export function settingsPatchToDTO(
+  patch: SettingsPatch,
+  base?: Settings | null,
+): SettingsPatchDTO {
+  const dto: SettingsPatchDTO = {};
+  const general = patch.general;
+  if (general) {
+    if (general.notifyOnComplete !== undefined) dto.notifications = general.notifyOnComplete;
+    if (general.historyLimit !== undefined) dto.historyLimit = general.historyLimit;
+  }
+  const iface = patch.interface;
+  if (iface) {
+    if (iface.appearance !== undefined) dto.theme = iface.appearance;
+    if (iface.glassBackground !== undefined) dto.glassBackground = iface.glassBackground;
+    if ('accentColor' in iface) {
+      const value = iface.accentColor?.trim();
+      dto.accentColor = value ? value.toUpperCase() : null;
+    }
+    if (iface.motion !== undefined) dto.motion = iface.motion;
+  }
+  const download = patch.download;
+  if (download) {
+    if ('outputDir' in download && download.outputDir !== undefined) {
+      dto.downloadDir = download.outputDir.trim() ? download.outputDir : null;
+    }
+    if (download.maxConcurrent !== undefined) dto.maxConcurrent = download.maxConcurrent;
+    if (download.clipboardWatch !== undefined) dto.watchClipboard = download.clipboardWatch;
+    if (download.downloadSubtitle !== undefined) dto.downloadSubtitle = download.downloadSubtitle;
+    if (download.downloadCover !== undefined) dto.downloadCover = download.downloadCover;
+    if (download.checkUpdatesOnStartup !== undefined) {
+      dto.checkUpdatesOnStartup = download.checkUpdatesOnStartup;
+    }
+  }
+  const quality = patch.quality;
+  if (quality) {
+    if (quality.strategy !== undefined) {
+      const fixed = quality.fixedQuality ?? base?.quality.fixedQuality;
+      dto.quality =
+        quality.strategy === 'best' ? 'best' : qualityLabelFor(fixed ?? 80);
+    } else if (quality.fixedQuality !== undefined) {
+      dto.quality = qualityLabelFor(quality.fixedQuality);
+    }
+    if (quality.codecPreference !== undefined) dto.codec = quality.codecPreference;
+    if (quality.audioFormat !== undefined) dto.audioFormat = quality.audioFormat;
+    if (quality.fallback !== undefined) dto.qualityFallback = quality.fallback;
+    if (quality.writeMetadata !== undefined) dto.writeMetadata = quality.writeMetadata;
+    if ('ffmpegPath' in quality && quality.ffmpegPath !== undefined) {
+      dto.ffmpegPath = quality.ffmpegPath.trim() ? quality.ffmpegPath : null;
+    }
+  }
+  const network = patch.network;
+  if (
+    network &&
+    (network.proxyMode !== undefined ||
+      network.proxyHost !== undefined ||
+      network.proxyPort !== undefined ||
+      network.proxyUser !== undefined ||
+      network.proxyPass !== undefined)
+  ) {
+    const mode = network.proxyMode ?? base?.network.proxyMode ?? 'direct';
+    if (mode === 'direct') {
+      dto.proxy = { mode: 'direct' };
+    } else {
+      dto.proxy = {
+        mode: 'manual',
+        host: network.proxyHost ?? base?.network.proxyHost ?? '',
+        port: network.proxyPort ?? base?.network.proxyPort ?? 7890,
+        user: network.proxyUser ?? base?.network.proxyUser ?? '',
+        pass: network.proxyPass ?? base?.network.proxyPass ?? '',
+      };
+    }
+  }
+  return dto;
+}
+
+/**
+ * `SettingsPatchDTO` → 内部设置（与 Rust `apply_settings_patch` 同语义）：
+ * 省略字段保持不变、`null` 清空可空字段。Mock 后端复用，便于前端契约测试。
+ */
+export function applySettingsPatchDTO(previous: Settings, patch: SettingsPatchDTO): Settings {
+  const next = mergeSettings(previous, {});
+  if ('downloadDir' in patch) {
+    next.download.outputDir = patch.downloadDir?.trim() || '';
+  }
+  if (patch.maxConcurrent !== undefined) next.download.maxConcurrent = patch.maxConcurrent;
+  if (patch.quality !== undefined) {
+    if (patch.quality === 'best') {
+      next.quality.strategy = 'best';
+    } else {
+      next.quality.strategy = 'fixed';
+      next.quality.fixedQuality = qualityLabelToQn(patch.quality);
+    }
+  }
+  if (patch.codec !== undefined) next.quality.codecPreference = codecPreferenceFrom(patch.codec);
+  if (patch.audioFormat !== undefined) {
+    next.quality.audioFormat = patch.audioFormat === 'mp3' ? 'mp3' : 'original';
+  }
+  if ('ffmpegPath' in patch) {
+    next.quality.ffmpegPath = patch.ffmpegPath?.trim() || '';
+  }
+  if (patch.proxy !== undefined) {
+    const host = patch.proxy.mode === 'manual' ? (patch.proxy.host ?? '').trim() : '';
+    // 与 Rust `proxy_url` 一致：手动模式地址为空视为直连（不保存无效代理）。
+    if (patch.proxy.mode === 'manual' && host) {
+      next.network.proxyMode = 'manual';
+      next.network.proxyHost = host;
+      next.network.proxyPort = patch.proxy.port ?? next.network.proxyPort;
+      next.network.proxyUser = patch.proxy.user ?? '';
+      next.network.proxyPass = patch.proxy.pass ?? '';
+    } else {
+      next.network.proxyMode = 'direct';
+      next.network.proxyHost = '';
+      next.network.proxyUser = '';
+      next.network.proxyPass = '';
+    }
+  }
+  if (patch.theme !== undefined) next.interface.appearance = patch.theme;
+  if (patch.notifications !== undefined) next.general.notifyOnComplete = patch.notifications;
+  if (patch.watchClipboard !== undefined) next.download.clipboardWatch = patch.watchClipboard;
+  if (patch.historyLimit !== undefined) next.general.historyLimit = patch.historyLimit;
+  if (patch.writeMetadata !== undefined) next.quality.writeMetadata = patch.writeMetadata;
+  if (patch.downloadSubtitle !== undefined) {
+    next.download.downloadSubtitle = patch.downloadSubtitle;
+  }
+  if (patch.downloadCover !== undefined) next.download.downloadCover = patch.downloadCover;
+  if (patch.checkUpdatesOnStartup !== undefined) {
+    next.download.checkUpdatesOnStartup = patch.checkUpdatesOnStartup;
+  }
+  if ('accentColor' in patch) {
+    const value = patch.accentColor?.trim();
+    next.interface.accentColor = value ? value.toUpperCase() : undefined;
+  }
+  if (patch.motion !== undefined) next.interface.motion = patch.motion;
+  if (patch.qualityFallback !== undefined) next.quality.fallback = patch.qualityFallback;
+  if (patch.glassBackground !== undefined) {
+    next.interface.glassBackground = patch.glassBackground;
+  }
+  return next;
+}
+
+/** 前端侧校验（契约 patch_settings 只返回 invalid-argument，这里提前给出字段级错误） */
 export function validateSettings(settings: Settings): SettingsValidationIssue[] {
   const issues: SettingsValidationIssue[] = [];
   const int = (value: number, min: number, max: number, path: string, message: string) => {
