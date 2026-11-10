@@ -73,7 +73,65 @@ Beads 是本项目的共享任务系统（`.beads/`，issue 前缀 `bilidown-`�
 - `.beads/hooks/` 下的 git hooks 已通过 `core.hooksPath` 接管 pre-commit / post-checkout 等，请勿删除或绕过。
 - 提交前确认 `git status` 干净、`openspec validate --all` 通过；索引数据（`.codegraph/`、`.beads/embeddeddolt/`）不入库，靠 `.gitignore` 排除。
 
-## 五、冲突时的优先级
+## 五、工程约束与验收门（从 OpenSpec 规格沉淀）
+
+`openspec/specs/` 是行为契约。修改相关代码前先读对应 capability 规格；以下为 agent 最容易踩的 MUST 级约束，细则以规格为准。
+
+### 5.1 通用
+
+- 行为修改（含 hotfix、补丁发布）也必须先建 change 文档并等用户确认，再写代码；不得以“紧急/发版/CI 失败”为由跳步。
+- 平台差异按规格执行：`desktop-shell` / `ui-theme` / `windows-distribution` 定义 Windows 惯例，`macos-distribution` 定义 macOS 发布约束；不得用一端的既有行为覆盖另一端的明确规格。
+
+### 5.2 窗口、设置与 Tauri 外壳
+
+- 主窗口关闭语义：Windows 隐藏到托盘、macOS 隐藏窗口，二者都不得直接退出进程（退出走退出保护）；设置窗口必须有可用的关闭入口，并在关闭前完成保存/放弃决策，不得出现点击无反应。
+- Tauri v2 的前端窗口 API（`destroy` / `close` / `setSize` 等）受 capability 限制：新增或修改这类调用时，必须同步 `src-tauri/capabilities/default.json` 并用测试锁住权限，避免权限缺失导致静默失败。
+- 菜单、Dock/任务栏、通知等系统集成按可见状态变化更新，不得在空闲时做周期性刷新；跨平台文案使用对应平台术语。
+
+### 5.3 更新与发布
+
+- 更新链路（`app-update`）：按平台精确匹配资产（`bilidown_<version>_aarch64.dmg` / `_x64-setup.exe`）；下载后必须用 `SHA256SUMS.txt` 校验；不得静默替换正在运行的应用；Windows 安装器启动失败必须返回可读错误并保持应用运行，不得静默退出。
+- 版本一致性：用 `node scripts/version.mjs --bump <版本>` 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`web/src/lib/constants.ts`，需通过 `node scripts/version.mjs` 检查。
+- Release：提前提交 `.github/release-notes/v<版本>.md`（`release.yml` 用 `--notes-file` 读取），推送 `v<版本>` tag 触发构建；资产必须同时包含 macOS DMG、Windows NSIS 与唯一 `SHA256SUMS.txt`。
+- README / 发布说明必须写明 macOS ad-hoc 签名与 Windows 未签名的放行方式（SmartScreen「更多信息 → 仍要运行」）。
+
+### 5.4 任务、持久化与数据
+
+- 任务清理只删除该任务拥有的临时数据；共享临时目录为空才可移除；不得删除已发布产物。
+- 运行任务被移除/暂停后必须继续调度，迟到事件不得复活已移除任务。
+- 任务元信息（作者、实际条目、实际清晰度/编码/音质、字幕与封面）必须持久化，不得用请求参数冒充实际采用参数。
+- 入队、删除、完成、历史写入与退出保存的持久化失败必须可见且可重试，不得只写日志后宣称成功。
+
+### 5.5 启动、设置与添加
+
+- 启动本地阶段（凭据/设置/队列）优先就绪，网络准备 5 秒预算并支持降级重试；单项加载失败必须局部重试，不得整窗空白或用空列表冒充成功。
+- 设置按字段原子提交，用 revision 防止旧响应覆盖；草稿与已保存分离，保存失败保留草稿并可重试/放弃。
+- 添加确认按真实条目数量判断；空选择不得回落默认；质量回退必须记录并展示实际采用值。
+
+### 5.6 性能与缓存
+
+- 首屏：辅助页面/面板懒加载；首屏必载 JS 相对同条件基线必须降低 ≥15%（`node scripts/measure-first-load.mjs web/dist`）。
+- 空闲零轮询；文件状态缓存不得替代恢复/文件操作前的真实校验；图片缓存有界（128 项 / 64 MiB、≤8 并发、单图 8 MiB 流式上限）。
+- 进度反馈 ≤10Hz、离散状态即时；不得通过降低并发、静默降画质或移除正常反馈换取性能数字。
+
+### 5.7 验收门（每次交付前）
+
+```bash
+pnpm typecheck && pnpm test && pnpm build:web && pnpm qa:interactions
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+openspec validate --all --strict
+```
+
+- 真机验收：macOS 行为按 `docs/qa/` 证据；Windows 真机不可用 CI 完全替代，未执行项不得勾选（CI 只补编译/单测证据）。
+- 仅文档、不触发 CI 的 push：commit message 加 `[skip ci]`（GitHub Actions 会跳过该次 push 的 workflow）。
+
+### 5.8 事故教训（2026-11-10）
+
+- v2.4.0/v2.4.1 两次修复未经 change 直接改 main 并发布，被用户纠正：hotfix 也必须先建 change 并等待确认。
+- Tauri capability 缺失会让前端窗口 API 静默拒绝；依赖 capability 的调用必须显式授权并加回归测试（`capability_allows_destroying_preferences_window` 为范例）。
+
+## 六、冲突时的优先级
 
 用户当轮明确指示 > 本文件规则 > 各工具默认行为。若用户指示与本文件冲突（例如要求跳过 change 直接改功能），先向用户指出规则并确认，得到明确许可后才可执行，并在 beads 中留痕。
 

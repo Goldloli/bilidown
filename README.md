@@ -24,6 +24,12 @@
 
 macOS 与 Windows 安装包均已内置 ffmpeg，无需安装 Homebrew、系统 ffmpeg 或配置 PATH。
 
+### 应用内更新
+
+- macOS：更新包下载并通过 SHA256 校验后，打开 DMG 覆盖安装即可；不会静默替换正在运行的实例。
+- Windows：校验通过后可点「安装并重启」，应用会先保存任务再退出并静默安装；若安装器无法启动，应用会保留并提示原因，可改用「打开安装程序」。
+- 任何平台都可以直接从 [Releases](https://github.com/Goldloli/bilidown/releases/latest) 手动下载安装包覆盖升级；队列、历史、登录状态与设置会保留。
+
 ## 核心能力
 
 | 模块 | 能力 |
@@ -148,9 +154,15 @@ pnpm qa:interactions
 Rust 检查：
 
 ```bash
-cargo test -p bilidown-core
-cargo test -p bilidown-app
+cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+```
+
+规格与版本检查：
+
+```bash
+openspec validate --all --strict
+node scripts/version.mjs
 ```
 
 首屏必载 JS 统计（构建后运行，递归统计静态 import，动态页面/面板不计入）：
@@ -185,8 +197,9 @@ crates/bilidown-core/   Rust 核心：B 站接口、解析、下载、ffmpeg、�
 src-tauri/              Tauri 桌面壳：窗口、菜单、托盘、IPC、更新与平台集成
 web/                    React 界面：队列、添加面板、历史、设置与视觉系统
 scripts/                构建、版本、ffmpeg 获取/构建与验收脚本
-openspec/               规格、变更提案与任务文档
-docs/                   设计、QA 与第三方说明
+openspec/               行为规格、变更提案与任务文档（功能变更入口）
+docs/                   设计、QA 验收证据与第三方说明
+AGENTS.md               协作规范（OpenSpec / Beads / CodeGraph / 验收门）
 ```
 
 ffmpeg 处理链：
@@ -203,6 +216,16 @@ bilidown-core 合并 DASH 流、转码 MP3、清理取消任务
 
 ## 发布
 
+发布前先同步版本号并准备 Release 说明（`release.yml` 会读取该文件，缺失会导致发布失败）：
+
+```bash
+node scripts/version.mjs --bump <版本>   # 同步 package.json / tauri.conf.json / Cargo.toml / 前端常量
+node scripts/version.mjs                 # 校验四处版本一致
+# 新增 .github/release-notes/v<版本>.md（Release 正文来源）
+git add -A && git commit -m "chore(release): 发布 <版本>"
+git tag v<版本> && git push origin v<版本>
+```
+
 推送 `v<版本>` tag 会触发 [Release workflow](.github/workflows/release.yml)，分别构建 macOS DMG 与 Windows NSIS 安装包，再由单一发布任务汇总：
 
 - `bilidown_<版本>_aarch64.dmg`
@@ -210,6 +233,14 @@ bilidown-core 合并 DASH 流、转码 MP3、清理取消任务
 - `SHA256SUMS.txt`
 
 macOS 发布前会校验 ffmpeg 的 arm64 架构、最低系统版本、系统依赖、LGPL 配置、`libmp3lame` 能力与包内路径；Windows 发布流程保持原有 NSIS 资产与校验格式。
+
+## 协作与规格
+
+- 协作规范与质量门：[`AGENTS.md`](AGENTS.md)；功能/行为变更必须先写 OpenSpec change 并获用户确认，再进入实现。
+- 行为规格（capability spec）：`openspec/specs/`（当前由维护者本地管理、未纳入 git）；涵盖下载、桌面外壳、界面、更新、登录、macOS/Windows 发布等契约。
+- 验收记录与性能基线：`docs/qa/`（本地维护，含 macOS 真机验收、首屏/CPU/唤醒数据与平台验收状态）。
+
+仅修改文档、不想触发 CI 时，可在 commit message 中加入 `[skip ci]`。
 
 ## 隐私与使用边界
 
