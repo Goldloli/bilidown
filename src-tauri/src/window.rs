@@ -211,37 +211,35 @@ pub fn handle_run_event(app: &AppHandle, event: RunEvent) {
     }
 }
 
-/// 更新安装：先优雅停止任务并退出，再启动 NSIS 安装器（`/S /UPDATE /R /ARGS=--updated`）。
-/// 安装器必须在应用退出后运行，避免静默安装时强杀进程弄脏队列数据库。
+/// 更新安装（Windows）：先优雅停止任务，再启动 NSIS 安装器
+/// （`/S /UPDATE /R /ARGS=--updated`）；安装器成功启动后才退出应用。
+///
+/// 启动失败时**不退出**，把错误返回给前端显示，避免「点了更新 → 应用退出 → 什么都没发生」。
 #[cfg(target_os = "windows")]
-pub fn quit_and_install(app: &AppHandle, installer: PathBuf) {
+pub async fn quit_and_install(app: &AppHandle, installer: PathBuf) -> Result<(), String> {
+    if let Some(core) = app.state::<ShellState>().try_core()
+        && let Err(err) = core.manager.shutdown().await
+    {
+        tracing::warn!(target: "shell::window", error = %err.describe(), "更新前 shutdown 失败");
+    }
+    app.state::<ShellState>().confirm_quit();
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let child = std::process::Command::new(&installer)
+        .args(["/S", "/UPDATE", "/R", "/ARGS=--updated"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|error| {
+            tracing::warn!(target: "shell::update", error = %error, path = %installer.display(), "启动更新安装器失败");
+            format!("启动更新安装器失败：{error}")
+        })?;
+    tracing::info!(target: "shell::update", path = %installer.display(), "已启动安装器，应用随后退出");
     let handle = app.clone();
+    // 给安装器留出初始化时间再退出；安装器的 RestartManager 会接管尚未退出的进程。
     tauri::async_runtime::spawn(async move {
-        if let Some(core) = handle.state::<ShellState>().try_core()
-            && let Err(err) = core.manager.shutdown().await
-        {
-            tracing::warn!(target: "shell::window", error = %err.describe(), "更新前 shutdown 失败");
-        }
-        handle.state::<ShellState>().confirm_quit();
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            match std::process::Command::new(&installer)
-                .args(["/S", "/UPDATE", "/R", "/ARGS=--updated"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-            {
-                Ok(_) => {
-                    tracing::info!(target: "shell::update", path = %installer.display(), "已启动安装器，应用退出")
-                }
-                Err(err) => tracing::warn!(target: "shell::update", error = %err, "启动安装器失败"),
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = installer;
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(child);
         handle.exit(0);
     });
+    Ok(())
 }

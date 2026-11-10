@@ -1049,15 +1049,15 @@ pub fn open_about_link(app: AppHandle, link: String) -> Result<(), String> {
 /// 安装器参数：`/S` 静默、`/UPDATE` 更新模式（不重复建快捷方式）、`/R` 完成后重启应用、
 /// `/ARGS=--updated` 让新版本启动时提示「已更新」并跳过启动检查。
 #[tauri::command]
-pub fn install_app_update(
+pub async fn install_app_update(
     app: AppHandle,
     state: tauri::State<'_, AppUpdateState>,
 ) -> Result<(), String> {
     let path = completed_installer_path(&state)?;
     #[cfg(target_os = "windows")]
     {
-        crate::window::quit_and_install(&app, path);
-        Ok(())
+        // 安装器启动失败时返回错误且应用保持运行，由前端提示；成功后再退出。
+        crate::window::quit_and_install(&app, path).await
     }
     #[cfg(not(target_os = "windows"))]
     {
