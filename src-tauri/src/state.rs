@@ -26,9 +26,12 @@ use crate::{dock, dto, events, menu};
 
 /// 文件状态展示缓存（design D9/7.2）：只缓存路径的 is_file/len，TTL 5 秒；
 /// 恢复/继续/文件操作等权威路径始终重新校验，不信任该缓存。
+type FileStatusEntry = (std::time::Instant, Option<(bool, u64)>);
+type FileStatusMap = std::collections::HashMap<String, FileStatusEntry>;
+
 #[derive(Default)]
 pub struct FileStatusCache {
-    entries: Mutex<std::collections::HashMap<String, (std::time::Instant, Option<(bool, u64)>)>>,
+    entries: Mutex<FileStatusMap>,
     /// 统计：真实 metadata 探测次数（测试性能验收用，design D10/7.3）。
     misses: AtomicU64,
     hits: AtomicU64,
@@ -57,6 +60,7 @@ impl FileStatusCache {
     }
 
     /// 真实 metadata 探测次数与缓存命中次数（测试/诊断用）。
+    #[cfg(test)]
     pub fn probe_counts(&self) -> (u64, u64) {
         (
             self.misses.load(Ordering::Relaxed),

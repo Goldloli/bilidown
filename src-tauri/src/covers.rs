@@ -18,8 +18,10 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// 支持的图片扩展名（磁盘缓存直接按 hash + 扩展名定位，不遍历目录，design D11/7.7）。
 const IMAGE_EXTS: [&str; 4] = ["jpg", "png", "webp", "gif"];
 
+type CoverClientCache = Mutex<Option<(Option<String>, reqwest::Client)>>;
+
 /// 按代理配置复用的图片 HTTP 客户端（不带登录 Cookie，design D11/7.7）。
-static COVER_CLIENT: OnceLock<Mutex<Option<(Option<String>, reqwest::Client)>>> = OnceLock::new();
+static COVER_CLIENT: OnceLock<CoverClientCache> = OnceLock::new();
 
 fn cover_client(proxy: Option<&str>) -> Option<reqwest::Client> {
     let key = proxy

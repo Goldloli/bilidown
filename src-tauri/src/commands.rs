@@ -8,7 +8,7 @@ use bilidown_core::api::{audio, parse, video};
 use bilidown_core::media::ffmpeg::Ffmpeg;
 use bilidown_core::storage::HistoryQuery;
 use bilidown_core::{BiliError, HistoryRecord, QueueSnapshot};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
@@ -728,7 +728,7 @@ pub async fn pick_directory(app: AppHandle) -> CommandResult<Option<String>> {
 }
 
 /// 文件缺失的可读错误：前端据此提示重新下载/重新解析（design D8/3.3）。
-fn file_missing_error(path: &PathBuf) -> AppErrorDTO {
+fn file_missing_error(path: &Path) -> AppErrorDTO {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
