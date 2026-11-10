@@ -652,7 +652,7 @@ fn spawn_snapshot_bridge(app: &AppHandle, core: &Arc<Core>) {
         let mut last_logged_in: Option<bool> = None;
         let mut last_running: Option<u32> = None;
         #[cfg(target_os = "windows")]
-        let mut last_taskbar: Option<(u64, u64, usize)> = None;
+        let mut last_taskbar: Option<(u64, u64, u32)> = None;
         loop {
             if rx.changed().await.is_err() {
                 break;
