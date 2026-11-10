@@ -89,7 +89,12 @@ fn history_entries(core: &Core, query: &HistoryQuery) -> CommandResult<Vec<Histo
         .db()
         .list_history(query)
         .map_err(AppErrorDTO::from)?;
-    Ok(rows.into_iter().map(history_dto).collect())
+    // 一次历史查询内共享文件状态探测（design D10/7.1）。
+    let mut probe = FileProbe::default();
+    Ok(rows
+        .into_iter()
+        .map(|row| history_dto_with_probe(row, &mut probe))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

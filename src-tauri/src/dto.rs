@@ -19,7 +19,7 @@ use bilidown_core::media::ffmpeg::Ffmpeg;
 use bilidown_core::storage::{HistoryRecord, MotionPreference, Settings, ThemePreference};
 use bilidown_core::{
     BiliError, DownloadArtifact, QueueSnapshot, TaskEvent, TaskExtras, TaskPhase, TaskSpec,
-    TaskView, artifact_file_valid, completed_entry_indices,
+    TaskView, completed_entry_indices,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -654,13 +654,47 @@ fn artifact_kind_str(kind: bilidown_core::ArtifactKind) -> &'static str {
     }
 }
 
-fn artifact_dtos(
+/// 单次 DTO 转换内的文件状态缓存（design D10/7.1）：
+/// 同一路径（同一批次内）只做一次 metadata 探测，避免每帧重复 stat。
+#[derive(Default)]
+pub struct FileProbe {
+    entries: HashMap<String, Option<(bool, u64)>>,
+}
+
+impl FileProbe {
+    fn lookup(&mut self, path: &str) -> Option<(bool, u64)> {
+        if let Some(hit) = self.entries.get(path) {
+            return *hit;
+        }
+        let probed = std::fs::metadata(path)
+            .ok()
+            .map(|metadata| (metadata.is_file(), metadata.len()));
+        self.entries.insert(path.to_string(), probed);
+        probed
+    }
+
+    fn exists(&mut self, path: &str) -> bool {
+        self.lookup(path).is_some_and(|(is_file, _)| is_file)
+    }
+
+    fn size_matches(&mut self, artifact: &DownloadArtifact) -> bool {
+        self.lookup(&artifact.path)
+            .is_some_and(|(is_file, len)| is_file && len == artifact.size)
+    }
+
+    fn valid(&mut self, artifact: &DownloadArtifact) -> bool {
+        self.size_matches(artifact)
+    }
+}
+
+fn artifact_dtos_with(
     artifacts: &[DownloadArtifact],
     selected: &HashSet<usize>,
+    probe: &mut FileProbe,
 ) -> Vec<TaskArtifactDTO> {
     let mut counts: HashMap<(Option<usize>, bilidown_core::ArtifactKind), usize> = HashMap::new();
     for artifact in artifacts {
-        if artifact_file_valid(artifact) {
+        if probe.valid(artifact) {
             *counts
                 .entry((artifact.entry_index, artifact.kind))
                 .or_default() += 1;
@@ -669,10 +703,8 @@ fn artifact_dtos(
     artifacts
         .iter()
         .map(|artifact| {
-            let exists = std::path::Path::new(&artifact.path).is_file();
-            let size_matches = std::fs::metadata(&artifact.path)
-                .map(|metadata| metadata.is_file() && metadata.len() == artifact.size)
-                .unwrap_or(false);
+            let exists = probe.exists(&artifact.path);
+            let size_matches = probe.size_matches(artifact);
             let entry_valid = artifact
                 .entry_index
                 .is_none_or(|entry| selected.is_empty() || selected.contains(&entry));
@@ -691,7 +723,7 @@ fn artifact_dtos(
         .collect()
 }
 
-fn task_artifact_dtos(view: &TaskView) -> Vec<TaskArtifactDTO> {
+fn task_artifact_dtos_with(view: &TaskView, probe: &mut FileProbe) -> Vec<TaskArtifactDTO> {
     let selected: HashSet<usize> = if !view.selected_entries.is_empty() {
         view.selected_entries.iter().copied().collect()
     } else {
@@ -703,7 +735,7 @@ fn task_artifact_dtos(view: &TaskView) -> Vec<TaskArtifactDTO> {
             .collect()
     };
     let completed = completed_entry_indices(view);
-    let mut artifacts = artifact_dtos(&view.artifacts, &selected);
+    let mut artifacts = artifact_dtos_with(&view.artifacts, &selected, probe);
     for artifact in &mut artifacts {
         if !(view.artifacts_legacy && artifact.entry_index.is_none()) {
             artifact.valid = artifact.valid
@@ -715,7 +747,17 @@ fn task_artifact_dtos(view: &TaskView) -> Vec<TaskArtifactDTO> {
     artifacts
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn task_dto(view: &TaskView, settings: &Settings, sort_index: i64) -> TaskDTO {
+    task_dto_with_probe(view, settings, sort_index, &mut FileProbe::default())
+}
+
+fn task_dto_with_probe(
+    view: &TaskView,
+    settings: &Settings,
+    sort_index: i64,
+    probe: &mut FileProbe,
+) -> TaskDTO {
     let progress = &view.progress;
     let bytes_total = progress.total;
     let entry_count = selected_entry_count(view);
@@ -747,7 +789,7 @@ pub fn task_dto(view: &TaskView, settings: &Settings, sort_index: i64) -> TaskDT
         .unwrap_or_else(|| settings.effective_download_dir())
         .to_string_lossy()
         .into_owned();
-    let artifacts = task_artifact_dtos(view);
+    let artifacts = task_artifact_dtos_with(view, probe);
     TaskDTO {
         id: view.id.clone(),
         status: view.phase.as_str().to_string(),
@@ -870,13 +912,15 @@ pub fn snapshot_dto(
     account: &AccountState,
     settings: &Settings,
 ) -> QueueSnapshotDTO {
+    // 同一批次内按路径复用文件状态探测（design D10/7.1）。
+    let mut probe = FileProbe::default();
     QueueSnapshotDTO {
         revision: snapshot.seq,
         tasks: snapshot
             .tasks
             .iter()
             .enumerate()
-            .map(|(index, view)| task_dto(view, settings, index as i64))
+            .map(|(index, view)| task_dto_with_probe(view, settings, index as i64, &mut probe))
             .collect(),
         stats: stats_dto(snapshot),
         account: account_dto(account),
@@ -1556,7 +1600,12 @@ pub fn apply_settings_patch(patch: &SettingsPatchDTO, previous: &Settings) -> Se
 // 转换：历史
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn history_dto(record: HistoryRecord) -> HistoryEntryDTO {
+    history_dto_with_probe(record, &mut FileProbe::default())
+}
+
+pub fn history_dto_with_probe(record: HistoryRecord, probe: &mut FileProbe) -> HistoryEntryDTO {
     let status = match record.status.as_str() {
         "done" | "completed" => "completed",
         "failed" => "failed",
@@ -1574,13 +1623,13 @@ pub fn history_dto(record: HistoryRecord) -> HistoryEntryDTO {
             None,
         ));
     }
-    let artifact_dtos = artifact_dtos(&artifacts, &HashSet::new());
+    let artifact_dtos = artifact_dtos_with(&artifacts, &HashSet::new(), probe);
     let primary_path = artifact_dtos
         .first()
         .map(|artifact| artifact.path.clone())
         .or(record.output_path.clone())
         .unwrap_or_default();
-    let file_exists = !primary_path.is_empty() && std::path::Path::new(&primary_path).is_file();
+    let file_exists = !primary_path.is_empty() && probe.exists(&primary_path);
     let total_size = if artifact_dtos.is_empty() {
         record.file_size.unwrap_or(0).max(0) as u64
     } else {
@@ -1770,6 +1819,40 @@ mod tests {
                 "缺失字段 {field}: {errors:?}"
             );
         }
+    }
+
+    #[test]
+    fn file_probe_reuses_metadata_within_one_batch() {
+        let dir = std::env::temp_dir().join(format!("bilidown-dto-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.mp4");
+        std::fs::write(&path, b"abc").unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+        let artifacts = vec![
+            DownloadArtifact::media(PathBuf::from(&path_str), 3, Some(0), Some("P1".into())),
+            DownloadArtifact::media(PathBuf::from(&path_str), 3, Some(1), Some("P2".into())),
+            DownloadArtifact::media(
+                dir.join("missing.mp4"),
+                3,
+                Some(2),
+                Some("P3".into()),
+            ),
+        ];
+        let mut probe = FileProbe::default();
+        let dtos = artifact_dtos_with(&artifacts, &HashSet::new(), &mut probe);
+        assert!(dtos[0].valid && dtos[1].valid);
+        assert!(!dtos[2].exists);
+        assert_eq!(
+            probe.entries.len(),
+            2,
+            "同一路径只探测一次，缺失路径也只探测一次"
+        );
+        // 同批次内第二个统计复用命中缓存，不重复 stat。
+        let again = artifact_dtos_with(&artifacts, &HashSet::new(), &mut probe);
+        assert_eq!(again.len(), 3);
+        assert_eq!(probe.entries.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

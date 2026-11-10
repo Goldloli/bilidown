@@ -168,7 +168,7 @@ impl Core {
 }
 
 /// 菜单可用性所需的队列计数（core 快照派生）。
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MenuCounts {
     pub queued: u32,
     pub active: u32,
@@ -561,31 +561,47 @@ fn spawn_snapshot_bridge(app: &AppHandle, core: &Arc<Core>) {
     let app = app.clone();
     let mut rx = core.manager.subscribe_snapshot();
     tauri::async_runtime::spawn(async move {
+        // 系统集成按「可见变化」更新，相同状态不重复设置（design D10/7.5）。
+        let mut last_counts: Option<MenuCounts> = None;
+        let mut last_logged_in: Option<bool> = None;
+        let mut last_running: Option<u32> = None;
+        #[cfg(target_os = "windows")]
+        let mut last_taskbar: Option<(u64, u64, usize)> = None;
         loop {
             if rx.changed().await.is_err() {
                 break;
             }
             let snapshot = rx.borrow_and_update().clone();
-            let account = app
+            let (account, settings) = app
                 .state::<ShellState>()
                 .try_core()
-                .map(|core| core.account())
-                .unwrap_or_default();
-            let settings = app
-                .state::<ShellState>()
-                .try_core()
-                .map(|core| core.settings())
+                .map(|core| (core.account(), core.settings()))
                 .unwrap_or_default();
             events::emit(
                 &app,
                 events::QUEUE_SNAPSHOT,
                 dto::snapshot_dto(&snapshot, &account, &settings),
             );
-            menu::refresh(&app);
+            let counts = MenuCounts::from_snapshot(&snapshot);
+            if last_counts != Some(counts) || last_logged_in != Some(account.logged_in) {
+                menu::refresh(&app);
+                last_counts = Some(counts);
+                last_logged_in = Some(account.logged_in);
+            }
             let running = snapshot.active_count + snapshot.queued_count;
-            dock::update(&app, running);
-            update_taskbar_progress(&app, &snapshot);
-            crate::energy::set_active(running > 0);
+            if last_running != Some(running) {
+                dock::update(&app, running);
+                crate::energy::set_active(running > 0);
+                last_running = Some(running);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let signature = taskbar_signature(&snapshot);
+                if last_taskbar != Some(signature) {
+                    update_taskbar_progress(&app, &snapshot);
+                    last_taskbar = Some(signature);
+                }
+            }
         }
     });
 }
@@ -659,6 +675,24 @@ fn notify(app: &AppHandle, core: &Arc<Core>, success: bool, title: &str, error: 
 }
 
 /// 任务栏进度条：Windows 用 Tauri 内置 `set_progress_bar` 展示整体下载进度。
+/// 任务栏进度签名：只有签名变化才更新系统任务栏（design D10/7.5）。
+#[cfg(target_os = "windows")]
+fn taskbar_signature(snapshot: &QueueSnapshot) -> (u64, u64, usize) {
+    let (done, total) = snapshot
+        .tasks
+        .iter()
+        .filter(|task| matches!(task.phase, TaskPhase::Downloading | TaskPhase::Merging))
+        .fold((0u64, 0u64), |(done, total), task| {
+            (
+                done.saturating_add(task.progress.downloaded),
+                total.saturating_add(task.progress.total),
+            )
+        });
+    let running = snapshot.active_count + snapshot.queued_count;
+    (done, total, running)
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn update_taskbar_progress(app: &AppHandle, snapshot: &QueueSnapshot) {
     #[cfg(target_os = "windows")]
     {
@@ -666,17 +700,7 @@ fn update_taskbar_progress(app: &AppHandle, snapshot: &QueueSnapshot) {
         let Some(win) = app.get_webview_window("main") else {
             return;
         };
-        let (done, total) = snapshot
-            .tasks
-            .iter()
-            .filter(|task| matches!(task.phase, TaskPhase::Downloading | TaskPhase::Merging))
-            .fold((0u64, 0u64), |(done, total), task| {
-                (
-                    done.saturating_add(task.progress.downloaded),
-                    total.saturating_add(task.progress.total),
-                )
-            });
-        let running = snapshot.active_count + snapshot.queued_count;
+        let (done, total, running) = taskbar_signature(snapshot);
         let state = if total > 0 {
             ProgressBarState {
                 status: Some(ProgressBarStatus::Normal),

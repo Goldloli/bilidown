@@ -167,6 +167,7 @@ impl TaskManager {
             dirty: HashSet::new(),
             auto_retried: HashSet::new(),
             last_progress_flush: Instant::now(),
+            last_publish: Instant::now(),
             seq: 0,
             snapshot_tx,
             snapshot_dirty: false,
@@ -452,6 +453,8 @@ struct Inner {
     /// 已对哪个任务做过一次「瞬时磁盘错误」自动重试（避免死循环）。
     auto_retried: HashSet<TaskId>,
     last_progress_flush: Instant,
+    /// 最近一次快照发布时刻（≤10Hz 合并，design D10/7.4）。
+    last_publish: Instant,
     seq: u64,
     snapshot_tx: watch::Sender<QueueSnapshot>,
     snapshot_dirty: bool,
@@ -469,10 +472,9 @@ impl Inner {
         mut cmd_rx: mpsc::Receiver<ManagerCommand>,
         mut worker_rx: mpsc::UnboundedReceiver<WorkerEvent>,
     ) {
-        let mut ticker = tokio::time::interval(SNAPSHOT_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending_shutdown: Option<oneshot::Sender<BiliResult<()>>> = None;
         loop {
+            let wake = self.next_deadline();
             tokio::select! {
                 cmd = cmd_rx.recv() => {
                     let Some(cmd) = cmd else { break };
@@ -488,10 +490,8 @@ impl Inner {
                     let Some(ev) = ev else { break };
                     self.handle_worker_event(ev).await;
                 }
-                _ = ticker.tick() => {
-                    self.flush_progress_if_due().await;
-                    self.retry_pending_cleanups().await;
-                    self.publish_if_due();
+                _ = wake_at(wake) => {
+                    self.run_due().await;
                 }
             }
         }
@@ -516,12 +516,7 @@ impl Inner {
         let snap = QueueSnapshot::from_tasks(self.seq, tasks);
         self.snapshot_tx.send_replace(snap);
         self.snapshot_dirty = false;
-    }
-
-    fn publish_if_due(&mut self) {
-        if self.snapshot_dirty {
-            self.publish();
-        }
+        self.last_publish = Instant::now();
     }
 
     fn mark_snapshot_dirty(&mut self) {
@@ -1383,15 +1378,36 @@ impl Inner {
         spawn_blocking_db(move || db.upsert_task(&record)).await
     }
 
-    async fn flush_progress_if_due(&mut self) {
-        if self.dirty.is_empty() {
-            return;
+    /// 下一次需要唤醒的时间点（design D10/7.4）：无待发布/待落盘/待重试时返回 None，
+    /// 空闲队列不再运行固定 interval 轮询。
+    fn next_deadline(&self) -> Option<Instant> {
+        let mut deadline: Option<Instant> = None;
+        if self.snapshot_dirty {
+            deadline = Some(self.last_publish + SNAPSHOT_INTERVAL);
         }
-        if self.last_progress_flush.elapsed() < self.flush_backoff {
-            return;
+        if !self.dirty.is_empty() {
+            let candidate = self.last_progress_flush + self.flush_backoff;
+            deadline = Some(deadline.map_or(candidate, |current| current.min(candidate)));
         }
-        if let Err(error) = self.flush_dirty().await {
-            tracing::warn!(error = %error, "flush progress failed");
+        if !self.pending_cleanups.is_empty() {
+            let candidate = self.last_cleanup_retry + CLEANUP_RETRY_INTERVAL;
+            deadline = Some(deadline.map_or(candidate, |current| current.min(candidate)));
+        }
+        deadline
+    }
+
+    /// 执行到期的发布/落盘/清理重试；无到期项时立即返回（design D10/7.4）。
+    async fn run_due(&mut self) {
+        if self.snapshot_dirty && self.last_publish.elapsed() >= SNAPSHOT_INTERVAL {
+            self.publish();
+        }
+        if !self.dirty.is_empty() && self.last_progress_flush.elapsed() >= self.flush_backoff {
+            if let Err(error) = self.flush_dirty().await {
+                tracing::warn!(error = %error, "flush progress failed");
+            }
+        }
+        if !self.pending_cleanups.is_empty() {
+            self.retry_pending_cleanups().await;
         }
     }
 
@@ -1740,6 +1756,19 @@ async fn cleanup_task_dirs(dirs: &[PathBuf]) -> Vec<(PathBuf, std::io::Error)> {
             PathBuf::from("<cleanup>"),
             std::io::Error::other(error.to_string()),
         )],
+    }
+}
+
+/// 等待到下一个 deadline；None 表示没有任何待办，永久挂起直到其他事件唤醒。
+async fn wake_at(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => {
+            let now = Instant::now();
+            if at > now {
+                tokio::time::sleep(at - now).await;
+            }
+        }
+        None => std::future::pending::<()>().await,
     }
 }
 
