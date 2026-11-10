@@ -1,12 +1,33 @@
 import { useRef, useState } from 'react';
 import { api } from '../lib/ipc';
+import { retryStartupNetwork, retryStartupSection } from '../lib/bootstrap';
 import { useAccountStore } from '../stores/useAccountStore';
+import { useStartupStore } from '../stores/useStartupStore';
 import { useUiStore } from '../stores/useUiStore';
 import { Icon, type IconName } from '../components/Icon';
 import { Avatar } from '../components/Avatar';
 import { Popover } from '../components/Popover';
 import { StatusBadge } from '../components/StatusBadge';
 import { t } from '../i18n/zh-CN';
+import type { AccountState, AccountValidation } from '../lib/types';
+
+/** 账号入口展示状态：校验中/降级不显示成「未登录」（tasks 5.4）。 */
+export type AccountEntryView = 'loading' | 'validating' | 'degraded' | 'login' | 'signed-in';
+
+export function accountEntryView(
+  account: AccountState | null,
+  validation: AccountValidation,
+  accountLoadFailed = false,
+): AccountEntryView {
+  const signedIn = Boolean(account?.signedIn);
+  if (!signedIn && validation === 'pending') return 'validating';
+  if (!signedIn && validation === 'degraded') return 'degraded';
+  // 账号分区独立加载失败：提供重试入口，而不是显示成「未登录」。
+  if (!signedIn && accountLoadFailed) return 'degraded';
+  if (!account) return 'loading';
+  if (!account.signedIn) return 'login';
+  return 'signed-in';
+}
 
 function qualityOf(vip: 'none' | 'monthly' | 'annual', signedIn: boolean): string {
   if (vip !== 'none') return '4K';
@@ -14,15 +35,71 @@ function qualityOf(vip: 'none' | 'monthly' | 'annual', signedIn: boolean): strin
 }
 
 /** 账户入口：未登录显示登录按钮；已登录显示头像 + 昵称 + 账户菜单 */
+export function ValidatingPill() {
+  return (
+    <button
+      type="button"
+      disabled
+      aria-label={t('account.validating')}
+      title={t('account.validationPendingTitle')}
+      className="inline-flex h-7 cursor-default items-center gap-1.5 rounded-full bg-hover px-2.5 text-xs text-fg3"
+    >
+      <Icon name="loader" size={13} className="animate-spin" />
+      <span className="hidden min-[820px]:inline">{t('account.validating')}</span>
+      <span className="min-[820px]:hidden">校验中</span>
+    </button>
+  );
+}
+
+export function ValidationRetryPill({
+  retrying = false,
+  onRetry,
+}: {
+  retrying?: boolean;
+  onRetry?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => (onRetry ? onRetry() : void retryStartupNetwork())}
+      disabled={retrying}
+      aria-label={t('account.validationDegraded')}
+      title={t('account.validationDegraded')}
+      className="inline-flex h-7 items-center gap-1.5 rounded-full bg-danger-weak px-2.5 text-xs text-danger transition-colors duration-[var(--dur-fast)] hover:brightness-[0.98] disabled:opacity-60"
+    >
+      <Icon
+        name={retrying ? 'loader' : 'warning'}
+        size={14}
+        className={retrying ? 'animate-spin' : ''}
+      />
+      <span className="hidden min-[820px]:inline">{t('account.validationDegraded')}</span>
+      <span className="min-[820px]:hidden">校验未完成</span>
+    </button>
+  );
+}
+
 export function AccountButton() {
   const account = useAccountStore((s) => s.account);
+  const validation = useAccountStore((s) => s.validation);
+  const retryingNetwork = useStartupStore((s) => s.retryingNetwork);
+  const accountLoadFailed = useStartupStore((s) => s.sections.account.status === 'error');
   const openPanel = useUiStore((s) => s.openPanel);
   const pushToast = useUiStore((s) => s.pushToast);
   const confirm = useUiStore((s) => s.confirm);
   const [menuOpen, setMenuOpen] = useState(false);
   const anchorRef = useRef<HTMLButtonElement>(null);
 
-  if (!account) {
+  const view = accountEntryView(account, validation, accountLoadFailed);
+  const retryAccount = () => {
+    if (accountLoadFailed) void retryStartupSection('account');
+    else void retryStartupNetwork();
+  };
+  // 账号校验未完成时不虚报「未登录」（tasks 5.4）；网络降级/加载失败时提供重试入口。
+  if (view === 'validating') return <ValidatingPill />;
+  if (view === 'degraded') {
+    return <ValidationRetryPill retrying={retryingNetwork} onRetry={retryAccount} />;
+  }
+  if (!account || view === 'loading') {
     return <div className="h-7 w-14 animate-pulse rounded-full bg-[var(--rail-bg)]" />;
   }
 
@@ -85,6 +162,13 @@ export function AccountButton() {
         </span>
         {vip !== 'none' && (
           <Icon name="diamond" size={11} className="hidden shrink-0 text-accent min-[820px]:block" />
+        )}
+        {validation === 'pending' && (
+          <Icon
+            name="loader"
+            size={10}
+            className="hidden shrink-0 animate-spin text-fg3 min-[820px]:block"
+          />
         )}
         <Icon name="chevron-down" size={10} className="hidden shrink-0 text-fg3 min-[820px]:block" />
       </button>

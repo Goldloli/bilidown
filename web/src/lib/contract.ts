@@ -370,6 +370,17 @@ export interface DragPayloadDTO {
   active: boolean;
 }
 
+/** core 启动阶段（design D5）：本地先就绪，网络阶段独立并在 5 秒预算内进入 ready/degraded。 */
+export type CoreStatusStage = 'local-ready' | 'network-ready' | 'network-degraded';
+
+export interface CoreStatusDTO {
+  stage: CoreStatusStage;
+  /** 网络准备代次：旧代次结果不得覆盖新状态（tasks 5.4） */
+  generation: number;
+  degraded: boolean;
+  error?: string | null;
+}
+
 export interface DropPayloadDTO {
   paths: string[];
   text: string;
@@ -394,6 +405,12 @@ export const CONTRACT_EVENTS = {
   shellDrag: 'shell://drag',
   shellDrop: 'shell://drop',
   shellQuitRequested: 'shell://quit-requested',
+  /** 启动分阶段（design D5） */
+  coreStatus: 'shell://core-status',
+  /** 封面缓存清理完成：前端失效内存图片缓存（design D11/7.7） */
+  coversCleared: 'covers://cleared',
+  /** 文件状态展示缓存失效：前端重新拉取队列/历史（design D9/7.2） */
+  filesInvalidated: 'files://invalidated',
 } as const;
 
 export type ContractEventName = (typeof CONTRACT_EVENTS)[keyof typeof CONTRACT_EVENTS];

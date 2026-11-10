@@ -63,6 +63,10 @@ export interface Backend {
   quitApp(): Promise<void>;
   /** 用户明确放弃未保存状态后强制退出 */
   forceQuitApp(): Promise<void>;
+  /** 本地初始化失败后重试；仅在 core 未就绪时生效（design D5/5.4） */
+  retryInit(): Promise<void>;
+  /** 本地已就绪时重新尝试设备激活/账号恢复（design D5/5.4） */
+  retryNetwork(): Promise<void>;
   getDiagnostics(): Promise<string>;
 
   parseInput(input: string): Promise<ParseResultDTO>;
@@ -142,12 +146,27 @@ class ApiClient {
   private lastSettings: AdaptedSettings | null = null;
   /** 已接受的最大设置修订号；-1 表示尚未建立/已重置 */
   private lastRevision = -1;
+  /**
+   * 账号网络校验是否可采信（tasks 5.4）：未校验时不拿临时匿名态限制清晰度兜底。
+   * 由启动协调器在 `shell://core-status` 后更新。
+   */
+  private accountTrusted = false;
 
   setBackend(backend: Backend): void {
     this.backend = backend;
     // 重新建立后端会话时重置本地修订状态（design D3）。
     this.lastSettings = null;
     this.lastRevision = -1;
+    this.accountTrusted = false;
+  }
+
+  /** 账号校验阶段变化（ready/degraded 后可采信网络/账号结果） */
+  setAccountTrusted(trusted: boolean): void {
+    this.accountTrusted = trusted;
+  }
+
+  get isAccountTrusted(): boolean {
+    return this.accountTrusted;
   }
 
   /** 已接受设置的服务端修订号（测试与调试用） */
@@ -193,12 +212,14 @@ class ApiClient {
       .filter(Boolean);
     const inputs = lines.length > 0 ? lines : [text.trim()];
     const account = await this.getAccount();
+    // 网络校验未完成时账号结果只用于展示，不用它限制清晰度兜底（tasks 5.4）。
+    const accountTrusted = this.accountTrusted || account.signedIn;
     const items: ParseResult['items'] = [];
     const failures: ParseFailure[] = [];
     for (const input of inputs) {
       try {
         const dto = await this.b().parseInput(input);
-        items.push(...parseResultFromDTO(dto, account).items);
+        items.push(...parseResultFromDTO(dto, account, accountTrusted).items);
       } catch (error) {
         failures.push({ raw: input, reason: errorMessageOf(error) });
       }
@@ -362,6 +383,8 @@ class ApiClient {
     });
   quitApp = () => this.b().quitApp();
   forceQuitApp = () => this.b().forceQuitApp();
+  retryInit = () => this.b().retryInit();
+  retryNetwork = () => this.b().retryNetwork();
   requestQuitCheck = () => this.b().requestQuitCheck();
   getAppInfo = () => this.b().getAppInfo();
   getMenuState = () => this.b().getMenuState();

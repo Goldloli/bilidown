@@ -192,6 +192,9 @@ export const zhCN = {
   'account.expiredHint': '登录已失效，请重新扫码',
   'account.anonymous': '未登录',
   'account.loginHint': '登录解锁 1080P',
+  'account.validating': '账号校验中…',
+  'account.validationDegraded': '账号校验未完成，点击重试',
+  'account.validationPendingTitle': '正在校验账号状态，本地内容可继续使用',
 
 
   'settings.title': '设置',
@@ -509,6 +512,8 @@ export const zhCN = {
   'persist.retrying': '保存中…',
 
   // ---- 文件缺失/操作失败（design D7/3.3）----
+  'files.refreshFailed': '文件状态刷新失败：{message}',
+  'files.checking': '文件状态核查中…',
   'file.missing': '文件已不存在，无法打开或定位',
   'file.sizeMismatch': '文件大小与记录不一致，无法打开',
   'file.invalid': '文件记录异常，无法打开',
@@ -537,6 +542,19 @@ export const zhCN = {
   'add.partial.allFailed': '{failed} 个内容入队失败',
   'add.partial.retry': '重试失败内容（{n}）',
   'add.partial.remaining': '剩余 {n} 个内容待入队',
+
+  // ---- 启动分阶段与局部失败恢复（design D5 / tasks 5.1/5.3/5.4）----
+  'startup.core.title': '引擎初始化失败',
+  'startup.core.hint': '可先重试；若持续失败，请检查网络或数据目录权限后重启应用。',
+  'startup.core.retry': '重试初始化',
+  'startup.settingsFailed': '设置加载失败：{message}',
+  'startup.historyFailed': '历史记录加载失败：{message}',
+  'startup.networkWarning': '网络准备未完成：{message}',
+  'startup.networkRetry': '重试网络',
+  'startup.retry': '重试',
+  'history.error.title': '历史记录加载失败',
+  'history.error.retry': '重试',
+  'history.error.banner': '历史记录刷新失败：{message}',
 } as const;
 
 export type StringKey = keyof typeof zhCN;

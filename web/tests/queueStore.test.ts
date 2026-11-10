@@ -92,6 +92,26 @@ describe('useQueueStore：快照与事件合并', () => {
     expect(tasks[0].id).toBe('new');
   });
 
+  it('修订号防旧值覆盖：迟到的初始读取不覆盖新快照（tasks 5.4）', () => {
+    useQueueStore.getState().setSnapshot({ ...makeSnapshot([makeTask('a')]), revision: 5 });
+    useQueueStore.getState().setSnapshot({ ...makeSnapshot([makeTask('old')]), revision: 3 });
+    expect((useQueueStore.getState().snapshot?.tasks ?? []).map((task) => task.id)).toEqual(['a']);
+
+    useQueueStore.getState().setSnapshot({ ...makeSnapshot([makeTask('b')]), revision: 6 });
+    expect((useQueueStore.getState().snapshot?.tasks ?? []).map((task) => task.id)).toEqual(['b']);
+  });
+
+  it('文件状态失效标记为未核实，成功刷新后恢复（tasks 7.2）', async () => {
+    useQueueStore.getState().setSnapshot(makeSnapshot([makeTask('a')]));
+    expect(useQueueStore.getState().filesVerified).toBe(true);
+    useQueueStore.getState().markFilesPending();
+    expect(useQueueStore.getState().filesVerified).toBe(false);
+
+    vi.spyOn(api, 'getQueueSnapshot').mockResolvedValue(makeSnapshot([makeTask('a')]));
+    await expect(useQueueStore.getState().refreshFiles()).resolves.toBe(true);
+    expect(useQueueStore.getState().filesVerified).toBe(true);
+  });
+
   it('task-removed 事件移除对应行', () => {
     useQueueStore.getState().setSnapshot(makeSnapshot([makeTask('a'), makeTask('b')]));
     useQueueStore.getState().handleQueueEvent({ type: 'task-removed', taskId: 'a' });

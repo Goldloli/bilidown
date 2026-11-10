@@ -33,6 +33,7 @@ export function TaskDetailPanel({ taskId, onClose }: { taskId: string; onClose: 
   const cancel = useQueueStore((s) => s.cancel);
   const retry = useQueueStore((s) => s.retry);
   const retryPersistence = useQueueStore((s) => s.retryPersistence);
+  const filesVerified = useQueueStore((s) => s.filesVerified);
   const openPanel = useUiStore((s) => s.openPanel);
   const pushToast = useUiStore((s) => s.pushToast);
 
@@ -325,7 +326,7 @@ export function TaskDetailPanel({ taskId, onClose }: { taskId: string; onClose: 
             {task.artifactCoverage === 'legacy-single' && (
               <p className="mb-2 text-2xs text-warning">{t('artifacts.legacy')}</p>
             )}
-            <ArtifactList artifacts={artifacts} />
+            <ArtifactList artifacts={artifacts} filesVerified={filesVerified} />
           </div>
         )}
 

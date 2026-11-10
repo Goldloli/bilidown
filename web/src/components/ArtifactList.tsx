@@ -21,9 +21,12 @@ function artifactState(artifact: TaskArtifact): { label: string; tone: string } 
 export function ArtifactList({
   artifacts,
   className,
+  filesVerified = true,
 }: {
   artifacts: TaskArtifact[];
   className?: string;
+  /** 文件状态展示缓存刚失效（窗口激活/文件操作失败）：不把未知当有效（tasks 7.2） */
+  filesVerified?: boolean;
 }) {
   const pushToast = useUiStore((state) => state.pushToast);
 
@@ -32,7 +35,9 @@ export function ArtifactList({
   return (
     <ul className={`space-y-1.5 ${className ?? ''}`}>
       {artifacts.map((artifact, index) => {
-        const state = artifactState(artifact);
+        const state = filesVerified
+          ? artifactState(artifact)
+          : { label: t('files.checking'), tone: 'text-fg3' };
         const target = artifactFileTarget(artifact);
         const open = () => {
           // 缺失/大小不符/记录异常时给出可读提示，不把失败当作打开成功

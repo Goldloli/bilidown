@@ -1,9 +1,10 @@
 import { createRoot } from 'react-dom/client';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import './styles/app.css';
 import { App } from './App';
 import { BootError } from './components/BootError';
 import { bootstrapApp } from './lib/bootstrap';
+import { useStartupStore } from './stores/useStartupStore';
 import { devParams } from './dev/scenario';
 import { applyTheme, readThemeOverride, systemTheme } from './lib/theme';
 import { applyGlass, readGlassPref } from './lib/glass';
@@ -22,33 +23,21 @@ const initialMotion = readMotionPref();
 applyMotion(initialMotion);
 watchSystemMotion(initialMotion, () => applyMotion(initialMotion));
 
+/** 首屏立即渲染骨架：bootstrap 在后台完成订阅与分区加载，不等待网络（tasks 5.1）。 */
 function Boot() {
-  const [error, setError] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  const fatalError = useStartupStore((s) => s.fatalError);
 
   useEffect(() => {
-    let alive = true;
-    bootstrapApp().then(
-      () => {
-        if (alive) setError(null);
-      },
-      (reason: unknown) => {
-        if (!alive) return;
-        setError(reason instanceof Error ? reason.message : String(reason));
-      },
-    );
-    return () => {
-      alive = false;
-    };
-  }, [attempt]);
+    void bootstrapApp();
+  }, []);
 
-  if (error) {
+  if (fatalError) {
     return (
       <BootError
-        message={error}
+        message={fatalError}
         onRetry={() => {
-          setError(null);
-          setAttempt((value) => value + 1);
+          useStartupStore.getState().clearFatalError();
+          void bootstrapApp();
         }}
       />
     );

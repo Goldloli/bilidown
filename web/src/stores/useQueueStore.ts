@@ -10,15 +10,22 @@ interface QueueState {
   snapshot: QueueSnapshot | null;
   loading: boolean;
   error: string | null;
+  /** 文件状态展示缓存是否已核实（design D9/7.2）：失效后重新拉取，期间不宣称「有效」 */
+  filesVerified: boolean;
   keyword: string;
   selectedTaskId: string | null;
   setSnapshot: (snapshot: QueueSnapshot) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
+  /** 文件状态失效：等待重新拉取（窗口激活/文件操作失败） */
+  markFilesPending: () => void;
   setKeyword: (keyword: string) => void;
   select: (id: string | null) => void;
   handleQueueEvent: (event: QueueEvent) => void;
-  refresh: () => Promise<void>;
+  /** 拉取最新队列；返回是否成功（局部重试/启动分区复用） */
+  refresh: () => Promise<boolean>;
+  /** 文件状态失效后的后台刷新：保持现有列表，失败不清空 */
+  refreshFiles: () => Promise<boolean>;
   getTask: (id: string) => QueueTask | null;
   pause: (id: string) => Promise<void>;
   resume: (id: string) => Promise<void>;
@@ -69,12 +76,30 @@ export const useQueueStore = create<QueueState>()((set, get) => ({
   snapshot: null,
   loading: true,
   error: null,
+  filesVerified: false,
   keyword: '',
   selectedTaskId: null,
 
-  setSnapshot: (snapshot) => set({ snapshot, loading: false, error: null }),
+  setSnapshot: (snapshot) => {
+    const current = get().snapshot;
+    // 修订号防旧值覆盖：迟到的初始读取/旧快照不得回退新状态（tasks 5.4）。
+    if (
+      current?.revision !== undefined &&
+      snapshot.revision !== undefined &&
+      snapshot.revision < current.revision
+    ) {
+      return;
+    }
+    set({
+      snapshot: { ...snapshot, revision: snapshot.revision ?? current?.revision },
+      loading: false,
+      error: null,
+      filesVerified: true,
+    });
+  },
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error, loading: false }),
+  markFilesPending: () => set({ filesVerified: false }),
   setKeyword: (keyword) => set({ keyword }),
   select: (selectedTaskId) => set({ selectedTaskId }),
 
@@ -114,8 +139,26 @@ export const useQueueStore = create<QueueState>()((set, get) => ({
     try {
       const snapshot = await api.getQueueSnapshot();
       get().setSnapshot(snapshot);
+      return true;
     } catch (error) {
-      get().setError(error instanceof Error ? error.message : String(error));
+      get().setError(errorMessageOf(error));
+      return false;
+    }
+  },
+
+  refreshFiles: async () => {
+    get().markFilesPending();
+    try {
+      const snapshot = await api.getQueueSnapshot();
+      get().setSnapshot(snapshot);
+      return true;
+    } catch (error) {
+      // 保持现有列表与「未核实」状态；文件操作本身仍由 shell 权威校验（design D9）。
+      useUiStore.getState().pushToast({
+        kind: 'warning',
+        message: t('files.refreshFailed', { message: errorMessageOf(error) }),
+      });
+      return false;
     }
   },
 

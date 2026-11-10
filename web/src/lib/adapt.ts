@@ -164,7 +164,18 @@ export function qualityLabelToQn(label: string | undefined | null): number {
   return Number.isFinite(number) ? number : 80;
 }
 
-export function qualityOptionsForAccount(account: AccountState | null): QualityOption[] {
+/**
+ * 清晰度档位（无后端 `qualities` 时的兜底）。
+ * `constrain !== false` 时按账号能力置灰；启动网络校验未完成时调用方传
+ * `constrain: false`，避免把尚未校验的匿名态当成最终权限而静默降档（tasks 5.4）。
+ */
+export function qualityOptionsForAccount(
+  account: AccountState | null,
+  options?: { constrain?: boolean },
+): QualityOption[] {
+  if (options?.constrain === false) {
+    return QUALITY_TIERS.map((tier) => ({ ...tier, available: true }));
+  }
   return QUALITY_TIERS.map((tier) => {
     const loggedIn = Boolean(account?.signedIn);
     if (!loggedIn) {
@@ -402,6 +413,7 @@ export function snapshotFromDTO(dto: QueueSnapshotDTO): QueueSnapshot {
     tasks: [...dto.tasks].sort((a, b) => a.sortIndex - b.sortIndex).map(taskFromDTO),
     stats: statsFromDTO(dto),
     account: accountFromDTO(dto.account, dto.capability),
+    revision: dto.revision,
   };
 }
 
@@ -487,8 +499,18 @@ function normalizeTimestamp(value: number | null | undefined): number | null {
   return value < 1_000_000_000_000 ? value * 1000 : value;
 }
 
-export function parseItemFromDTO(dto: ParseResultDTO, account: AccountState | null): ParseItem {
-  const qualities = dto.qualities?.length ? dto.qualities.map(qualityFromDTO) : qualityOptionsForAccount(account);
+/**
+ * `accountTrusted=false`（网络校验未完成）时，不拿临时匿名账号限制清晰度档位，
+ * 避免启动顺序把已登录用户静默降档（tasks 5.4）。
+ */
+export function parseItemFromDTO(
+  dto: ParseResultDTO,
+  account: AccountState | null,
+  accountTrusted = true,
+): ParseItem {
+  const qualities = dto.qualities?.length
+    ? dto.qualities.map(qualityFromDTO)
+    : qualityOptionsForAccount(account, { constrain: accountTrusted });
   const codecs = dto.codecs?.length ? dto.codecs.map(codecFromDTO) : VIDEO_CODECS;
   const audioFormats = dto.audioFormats?.length ? dto.audioFormats.map(audioFromDTO) : AUDIO_FORMATS;
   const audioQualities = dto.audioQualities?.length ? dto.audioQualities : [];
@@ -517,8 +539,12 @@ export function parseItemFromDTO(dto: ParseResultDTO, account: AccountState | nu
   };
 }
 
-export function parseResultFromDTO(dto: ParseResultDTO, account: AccountState | null): ParseResult {
-  const item = parseItemFromDTO(dto, account);
+export function parseResultFromDTO(
+  dto: ParseResultDTO,
+  account: AccountState | null,
+  accountTrusted = true,
+): ParseResult {
+  const item = parseItemFromDTO(dto, account, accountTrusted);
   return {
     items: [item],
     failures: [],

@@ -37,6 +37,8 @@ export function createTauriBackend(): Backend {
     openPreferences: () => invoke<void>('open_preferences'),
     quitApp: () => invoke<void>('quit_app'),
     forceQuitApp: () => invoke<void>('force_quit_app'),
+    retryInit: () => invoke<void>('retry_init'),
+    retryNetwork: () => invoke<void>('retry_network'),
     getDiagnostics: () => invoke<string>('get_diagnostics'),
 
     parseInput: (input) => invoke<ParseResultDTO>('parse_input', { input }),

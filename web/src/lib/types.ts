@@ -201,10 +201,21 @@ export interface AccountState {
   capability: { anonymousMax: number; signedInMax: number; vipMax: number };
 }
 
+/**
+ * 账号网络校验状态（design D5/tasks 5.4）：
+ * · idle：尚未开始（启动装配中）
+ * · pending：本地凭据已装载，网络校验未结束（不把匿名结果当最终状态）
+ * · ready：网络阶段结束，账号结果可采信
+ * · degraded：网络准备超时/失败（不清除凭据，可重试）
+ */
+export type AccountValidation = 'idle' | 'pending' | 'ready' | 'degraded';
+
 export interface QueueSnapshot {
   tasks: QueueTask[];
   stats: QueueStats;
   account: AccountState;
+  /** 队列修订号（来自后端 seq）：较旧的初始读取/迟到快照不得覆盖新状态（tasks 5.4） */
+  revision?: number;
 }
 
 export type HistoryStatus = 'completed' | 'failed' | 'cancelled';

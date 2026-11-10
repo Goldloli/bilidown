@@ -5,6 +5,7 @@ import { copyLink, handleParseText } from '../lib/actions';
 import { formatBytes, formatDateTime, formatDateGroup } from '../lib/format';
 import { kindIcon } from '../lib/media';
 import { api } from '../lib/ipc';
+import { retryStartupSection } from '../lib/bootstrap';
 import { errorMessageOf } from '../lib/errors';
 import { isPending, pendingLabel, type PendingFeature } from '../lib/capabilities';
 import type { HistoryEntry, HistoryStatus, TaskArtifact } from '../lib/types';
@@ -32,6 +33,7 @@ const STATUS_BADGE: Record<HistoryStatus, { tone: 'success' | 'danger' | 'neutra
 };
 
 function HistoryRow({ entry }: { entry: HistoryEntry }) {
+  const filesVerified = useHistoryStore((s) => s.filesVerified);
   const pushToast = useUiStore((s) => s.pushToast);
   const confirm = useUiStore((s) => s.confirm);
   const openContext = useUiStore((s) => s.openContext);
@@ -143,7 +145,10 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
         <div className="mt-1 flex items-center gap-1.5 text-2xs text-fg2">
           <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
           <span className="truncate">{entry.qualityLabel}</span>
-          {!entry.fileExists && entry.status === 'completed' && (
+          {!filesVerified && entry.status === 'completed' && (
+            <StatusBadge tone="neutral">{t('files.checking')}</StatusBadge>
+          )}
+          {filesVerified && !entry.fileExists && entry.status === 'completed' && (
             <StatusBadge tone="neutral">{t('history.missing')}</StatusBadge>
           )}
           {entry.artifactCoverage === 'legacy-single' && (
@@ -183,7 +188,7 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
           {entry.artifactCoverage === 'legacy-single' && (
             <p className="mb-1.5 text-2xs text-warning">{t('artifacts.legacy')}</p>
           )}
-          <ArtifactList artifacts={artifacts} />
+          <ArtifactList artifacts={artifacts} filesVerified={filesVerified} />
         </div>
       )}
     </div>
@@ -195,6 +200,7 @@ export function HistoryView() {
   const keyword = useHistoryStore((s) => s.keyword);
   const status = useHistoryStore((s) => s.status);
   const loading = useHistoryStore((s) => s.loading);
+  const error = useHistoryStore((s) => s.error);
   const setKeyword = useHistoryStore((s) => s.setKeyword);
   const setStatus = useHistoryStore((s) => s.setStatus);
   const clearAll = useHistoryStore((s) => s.clearAll);
@@ -217,6 +223,11 @@ export function HistoryView() {
       setSearchOpen(false);
     }
   }, [searchOpen, setSearchOpen]);
+
+  // 打开历史列表时重新拉取文件状态，不信任旧展示缓存（design D9/tasks 7.2）。
+  useEffect(() => {
+    void useHistoryStore.getState().load();
+  }, []);
 
   const flat = useMemo<FlatItem[]>(() => {
     const items: FlatItem[] = [];
@@ -291,8 +302,33 @@ export function HistoryView() {
         </div>
       </div>
 
+      {error && entries.length > 0 && (
+        <div
+          role="alert"
+          className="mx-4 mb-1 flex items-center gap-2 rounded-card border border-line px-3 py-1.5"
+          style={{ background: 'var(--danger-weak)' }}
+        >
+          <Icon name="warning" size={13} className="shrink-0 text-danger" />
+          <span className="min-w-0 flex-1 truncate text-2xs text-fg">
+            {t('history.error.banner', { message: error })}
+          </span>
+          <button
+            type="button"
+            className="shrink-0 rounded-[6px] px-2 py-0.5 text-2xs text-accent hover:bg-accent-weak"
+            onClick={() => void retryStartupSection('history')}
+          >
+            {t('history.error.retry')}
+          </button>
+        </div>
+      )}
       {loading && entries.length === 0 ? (
         <div className="px-4 py-2 text-xs text-fg2">正在加载历史…</div>
+      ) : error && entries.length === 0 ? (
+        <EmptyState icon="warning" title={t('history.error.title')} subtitle={error}>
+          <Button variant="secondary" icon="refresh" onClick={() => void retryStartupSection('history')}>
+            {t('history.error.retry')}
+          </Button>
+        </EmptyState>
       ) : entries.length === 0 ? (
         <EmptyState
           icon="history"

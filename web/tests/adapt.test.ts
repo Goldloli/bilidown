@@ -4,6 +4,7 @@ import {
   accountFromDTO,
   defaultInternalSettings,
   parseItemFromDTO,
+  parseResultFromDTO,
   settingsFromDTO,
   settingsToDTO,
   snapshotFromDTO,
@@ -126,6 +127,23 @@ describe('adapt：契约 DTO ↔ UI 模型', () => {
     expect(snapshot.account.signedIn).toBe(false);
     expect(snapshot.account.capability.signedInMax).toBe(1080);
     expect(snapshot.account.capability.vipMax).toBe(2160);
+  });
+
+  it('无 qualities 兜底：网络校验未完成时不按临时匿名态限制清晰度（tasks 5.4）', () => {
+    const dto = {
+      kind: 'video',
+      sourceId: 'BV1',
+      title: '示例',
+      coverUrl: null,
+      pageUrl: 'https://www.bilibili.com/video/BV1',
+      owner: 'UP',
+      entries: [{ index: 0, title: 'P1', selectedDefault: true }],
+      rawInput: 'https://www.bilibili.com/video/BV1',
+    } as ParseResultDTO;
+    const unvalidated = parseResultFromDTO(dto, ANONYMOUS_ACCOUNT, false);
+    expect(unvalidated.items[0]?.qualities.every((quality) => quality.available)).toBe(true);
+    const validated = parseResultFromDTO(dto, ANONYMOUS_ACCOUNT, true);
+    expect(validated.items[0]?.qualities.some((quality) => !quality.available)).toBe(true);
   });
 
   it('账号映射：匿名 / 登录 / 大会员', () => {

@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
 import { t } from '../i18n/zh-CN';
 import { handleParseText } from '../lib/actions';
+import { retryStartupCore, retryStartupSection } from '../lib/bootstrap';
 import { devParams } from '../dev/scenario';
 import { useAsyncComponent } from '../lib/asyncComponent';
 import { useQueueStore } from '../stores/useQueueStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { useStartupStore } from '../stores/useStartupStore';
 import { useUiStore } from '../stores/useUiStore';
+import { CoreErrorPanel } from '../components/CoreErrorPanel';
 import { Icon } from '../components/Icon';
 import { QueueRowSkeleton } from '../components/Skeleton';
 import { BottomBar } from './BottomBar';
@@ -26,12 +29,19 @@ export function MainWindow() {
   const panel = useUiStore((s) => s.panel);
   const [dragOver, setDragOver] = useState(false);
   const contextTarget = useUiStore((s) => s.contextTarget);
+  // 启动分阶段与局部失败（tasks 5.1/5.3）：核心失败时窗口仍可见并可重试。
+  const corePhase = useStartupStore((s) => s.corePhase);
+  const coreError = useStartupStore((s) => s.coreError);
+  const retryingCore = useStartupStore((s) => s.retryingCore);
+  const queueSection = useStartupStore((s) => s.sections.queue);
+  const settingsSection = useStartupStore((s) => s.sections.settings);
   const historyView = useAsyncComponent(loadHistoryView, view === 'history');
   const contextMenu = useAsyncComponent(loadContextMenu, contextTarget !== null);
   // 覆盖层在首次渲染后立刻异步加载（不阻塞首屏，事件到达前通常已就绪）。
   const overlayHost = useAsyncComponent(loadOverlayHost, true);
 
-  const ready = Boolean(snapshot && settings);
+  // 队列分区就绪即渲染本地内容；设置失败不阻塞队列/历史（设置窗口独立展示错误）。
+  const ready = Boolean(snapshot) || queueSection.status === 'error';
 
   // dev QA 场景：自动弹出 UGC 合集确认，供截图流水线（正常用户不会命中）
   useEffect(() => {
@@ -73,6 +83,24 @@ export function MainWindow() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  if (corePhase === 'failed' && coreError) {
+    return (
+      <div className="flex h-full flex-col" style={{ background: 'var(--bg-window)' }}>
+        <TitleBar />
+        <main
+          className="grid min-h-0 flex-1 place-items-center px-8"
+          style={{ background: 'var(--bg-content)' }}
+        >
+          <CoreErrorPanel
+            message={coreError}
+            retrying={retryingCore}
+            onRetry={() => void retryStartupCore()}
+          />
+        </main>
+      </div>
+    );
+  }
+
   if (!ready) {
     return (
       <div className="flex h-full flex-col" style={{ background: 'var(--bg-window)' }}>
@@ -111,6 +139,25 @@ export function MainWindow() {
           if (text.trim()) void handleParseText(text);
         }}
       >
+        {settingsSection.status === 'error' && !settings && (
+          <div
+            role="alert"
+            className="mx-4 mt-2 flex items-center gap-2 rounded-card border border-line px-3 py-1.5"
+            style={{ background: 'var(--danger-weak)' }}
+          >
+            <Icon name="warning" size={13} className="shrink-0 text-danger" />
+            <span className="min-w-0 flex-1 truncate text-2xs text-fg">
+              {t('startup.settingsFailed', { message: settingsSection.error ?? '' })}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 rounded-[6px] px-2 py-0.5 text-2xs text-accent hover:bg-accent-weak"
+              onClick={() => void retryStartupSection('settings')}
+            >
+              {t('startup.retry')}
+            </button>
+          </div>
+        )}
         {view === 'queue' ? (
           <QueueView />
         ) : historyView.Page ? (

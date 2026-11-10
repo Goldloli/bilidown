@@ -1,18 +1,31 @@
 import { useEffect, useState } from 'react';
 import { Skeleton } from './components/Skeleton';
 import { useAsyncComponent } from './lib/asyncComponent';
+import { retryStartupSection } from './lib/bootstrap';
+import { devParams } from './dev/scenario';
+import { TrafficLights } from './shell/TrafficLights';
+import { WindowControls } from './shell/WindowControls';
+import { useSettingsStore } from './stores/useSettingsStore';
+import { useStartupStore } from './stores/useStartupStore';
 import { MainWindow } from './shell/MainWindow';
 
 /** 页面加载态：沿用主窗口骨架风格，不出现空白框架（tasks 8.1/8.2）。 */
 function PageLoading({ label }: { label: string }) {
+  const params = devParams();
   return (
     <div className="flex h-full flex-col" style={{ background: 'var(--bg-window)' }}>
-      <div
-        className="flex items-center px-4"
-        style={{ height: 'var(--titlebar-height, 38px)' }}
+      {/* 加载骨架也保留窗口控制，避免等待网络/模块时窗口无法操作（tasks 5.1）。 */}
+      <header
+        data-tauri-drag-region
+        className="drag-region titlebar relative flex shrink-0 items-center gap-1.5 px-4"
+        style={{ height: 'var(--titlebar-h)' }}
       >
+        {params.mock && params.os !== 'windows' && <TrafficLights />}
         <Skeleton className="h-3 w-24" />
-      </div>
+        <div className="ml-auto flex items-center gap-1.5">
+          <WindowControls />
+        </div>
+      </header>
       <main className="min-h-0 flex-1 px-4 pt-2" style={{ background: 'var(--bg-content)' }}>
         <p className="mb-3 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
           {label}
@@ -67,6 +80,8 @@ export function App() {
   const route = useHashRoute();
   const preferences = useAsyncComponent(loadPreferences, route === 'preferences');
   const gallery = useAsyncComponent(loadGallery, route === 'gallery');
+  const settings = useSettingsStore((s) => s.settings);
+  const settingsSection = useStartupStore((s) => s.sections.settings);
 
   // 主窗口就绪后一次性预加载常用设置页面代码，避免首次打开设置时白屏（tasks 8.1）。
   useEffect(() => {
@@ -83,6 +98,18 @@ export function App() {
   }, [route]);
 
   if (route === 'preferences') {
+    // 设置窗口先渲染骨架；顶部设置独立加载，失败时局部重试（tasks 5.1/5.3）。
+    if (!settings) {
+      if (settingsSection.status === 'error') {
+        return (
+          <PageError
+            message={settingsSection.error ?? '设置加载失败'}
+            onRetry={() => void retryStartupSection('settings')}
+          />
+        );
+      }
+      return <PageLoading label="正在加载偏好设置…" />;
+    }
     if (preferences.error) {
       return <PageError message={preferences.error} onRetry={preferences.retry} />;
     }
