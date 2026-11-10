@@ -77,6 +77,7 @@ fn main() {
         // 应用
         commands::get_app_info,
         commands::open_preferences,
+        commands::close_preferences_window,
         commands::quit_app,
         commands::get_diagnostics,
         commands::retry_init,
@@ -148,6 +149,7 @@ fn main() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         commands::get_app_info,
         commands::open_preferences,
+        commands::close_preferences_window,
         commands::quit_app,
         commands::get_diagnostics,
         commands::retry_init,

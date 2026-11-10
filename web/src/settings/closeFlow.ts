@@ -46,7 +46,7 @@ export interface PreferencesCloseHandler {
 
 /**
  * 安装关闭拦截：第一次关闭请求先 preventDefault 并交给 `requestClose` 决定；
- * 允许关闭时再 destroy（destroy 不再触发 CloseRequested，避免二次拦截/重复提示）。
+ * 允许关闭时再 destroy（实现方传入 Rust 命令，避免前端 window.destroy capability 限制）。
  */
 export async function installPreferencesCloseHandler(
   window: ClosablePreferencesWindow,
@@ -67,7 +67,13 @@ export async function installPreferencesCloseHandler(
     }
     if (!canClose || allowed) return;
     allowed = true;
-    await window.destroy();
+    try {
+      await window.destroy();
+    } catch (error) {
+      // Tauri 的 destroy 受 capability 权限约束：失败时不能静默假装已关闭。
+      console.error('[settings] 关闭设置窗口失败', error);
+      throw error;
+    }
   };
   const unlisten = await window.onCloseRequested(handler);
   return {

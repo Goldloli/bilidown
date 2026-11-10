@@ -2,7 +2,10 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "bilidown 主窗口最小权限：核心默认 + 事件通知/剪贴板/打开器/目录选择/窗口状态。文件系统操作一律走 Rust command，不授予前端 fs 通配权限。",
-  "windows": ["main", "preferences"],
+  "windows": [
+    "main",
+    "preferences"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -10,6 +13,7 @@
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:window:allow-is-maximized",
     "notification:default",
     "clipboard-manager:default",

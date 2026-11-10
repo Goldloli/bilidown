@@ -1,5 +1,6 @@
 import '../i18n/zh-CN.dynamic';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { CloseRequestedEvent } from '@tauri-apps/api/window';
 import { t, type StringKey } from '../i18n/zh-CN';
@@ -75,11 +76,18 @@ export function PreferencesApp() {
     return () => cancelAnimationFrame(raf);
   }, [settings]);
 
-  const closeWindow = useCallback(async (): Promise<void> => {
-    const window = windowRef.current;
-    pendingCloseRef.current = false;
-    if (window) await window.destroy();
+  /**
+   * 关闭设置窗口走 Rust 命令：前端 `window.destroy()` 受 Tauri capability 约束，
+   * 一旦权限缺失会静默失败（v2.4.0 红绿灯无反应）。Rust 侧 destroy 不受该限制。
+   */
+  const destroyWindow = useCallback(async (): Promise<void> => {
+    await invoke('close_preferences_window');
   }, []);
+
+  const closeWindow = useCallback(async (): Promise<void> => {
+    pendingCloseRef.current = false;
+    if (windowRef.current) await destroyWindow();
+  }, [destroyWindow]);
 
   /** 所有关闭入口（窗口按钮/原生关闭/快捷键）统一走这里：先提交并等待保存（design D4）。 */
   const requestClose = useCallback(async (): Promise<boolean> => {
@@ -122,12 +130,12 @@ export function PreferencesApp() {
       try {
         const window = getCurrentWindow();
         if (disposed) return;
-        windowRef.current = { destroy: () => window.destroy() };
+        windowRef.current = { destroy: destroyWindow };
         const handler = await installPreferencesCloseHandler(
           {
             onCloseRequested: (onClose) =>
               window.onCloseRequested((event: CloseRequestedEvent) => onClose(event)),
-            destroy: () => window.destroy(),
+            destroy: destroyWindow,
           },
           requestClose,
         );

@@ -203,6 +203,18 @@ pub async fn open_preferences(app: AppHandle) -> CommandResult<()> {
     Ok(())
 }
 
+/// 关闭偏好设置窗口：前端关闭流程（保存/放弃确认）完成后调用。
+/// 不依赖前端 `window.destroy()` 的 capability，避免权限缺失时红绿灯静默失效。
+#[tauri::command]
+pub fn close_preferences_window(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("preferences") {
+        tracing::info!(target: "shell::window", "关闭偏好设置窗口（前端流程已确认）");
+        if let Err(err) = win.destroy() {
+            tracing::warn!(target: "shell::window", error = %err, "关闭偏好设置窗口失败");
+        }
+    }
+}
+
 /// 主动退出：先保存（可重试），保存失败时返回错误、不退出，由前端提供「重试保存 / 仍然退出」。
 #[tauri::command]
 pub async fn quit_app(app: AppHandle, state: State<'_, ShellState>) -> CommandResult<()> {

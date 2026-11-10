@@ -174,6 +174,21 @@ fn placement(window: &WebviewWindow) -> tauri::Result<Placement> {
 mod tests {
     use super::*;
 
+    /// 回归测试：设置窗口关闭流程依赖 JS `window.destroy()`，
+    /// Tauri v2 的 destroy 命令必须显式授予 capability（core:window:default 不含）。
+    #[test]
+    fn capability_allows_destroying_preferences_window() {
+        let capabilities = include_str!("../capabilities/default.json");
+        assert!(
+            capabilities.contains("core:window:allow-destroy"),
+            "capabilities/default.json 缺少 core:window:allow-destroy，设置窗口红绿灯将无法关闭"
+        );
+        assert!(
+            capabilities.contains("core:window:allow-close"),
+            "capabilities/default.json 缺少 core:window:allow-close"
+        );
+    }
+
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
         Rect {
             x,
