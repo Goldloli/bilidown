@@ -4,6 +4,7 @@ import { errorMessageOf } from '../lib/errors';
 import { t } from '../i18n/zh-CN';
 import type { ClearOutcome, QueueSnapshot, QueueTask } from '../lib/types';
 import type { QueueEvent } from '../lib/types';
+import { reuseUnchangedTasks } from '../lib/adapt';
 import { useUiStore } from './useUiStore';
 
 interface QueueState {
@@ -90,8 +91,13 @@ export const useQueueStore = create<QueueState>()((set, get) => ({
     ) {
       return;
     }
+    const tasks = reuseUnchangedTasks(current?.tasks, snapshot.tasks);
     set({
-      snapshot: { ...snapshot, revision: snapshot.revision ?? current?.revision },
+      snapshot: {
+        ...snapshot,
+        tasks,
+        revision: snapshot.revision ?? current?.revision,
+      },
       loading: false,
       error: null,
       filesVerified: true,

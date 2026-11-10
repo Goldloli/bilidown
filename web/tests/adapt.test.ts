@@ -5,6 +5,7 @@ import {
   defaultInternalSettings,
   parseItemFromDTO,
   parseResultFromDTO,
+  reuseUnchangedTasks,
   settingsFromDTO,
   settingsToDTO,
   snapshotFromDTO,
@@ -291,5 +292,29 @@ describe('adapt：契约 DTO ↔ UI 模型', () => {
     expect(item.entries.filter((entry) => entry.selectedByDefault)).toHaveLength(1);
     expect(item.qualities[0].label).toBe('1080P');
     expect(item.uploader).toBe('示例制作组');
+  });
+});
+
+describe('快照热更新对象复用（tasks 7.3）', () => {
+  it('未变化任务复用旧对象，只有进度/阶段变化的任务换成新对象', () => {
+    const doneOld = taskFromDTO(
+      makeTaskDTO({ id: 'done-1', status: 'done', updatedAt: 2_000 }),
+    );
+    const doneNew = taskFromDTO(
+      makeTaskDTO({ id: 'done-1', status: 'done', updatedAt: 2_000 }),
+    );
+    const activeOld = taskFromDTO(
+      makeTaskDTO({ id: 'active-1', status: 'downloading', updatedAt: 2_000 }),
+    );
+    const activeNew = taskFromDTO(
+      makeTaskDTO({ id: 'active-1', status: 'downloading', updatedAt: 3_000 }),
+    );
+    const reused = reuseUnchangedTasks(
+      [doneOld, activeOld],
+      [doneNew, activeNew],
+    );
+    expect(reused[0]).toBe(doneOld);
+    expect(reused[1]).toBe(activeNew);
+    expect(reused[1]).not.toBe(activeOld);
   });
 });

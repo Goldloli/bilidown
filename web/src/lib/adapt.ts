@@ -417,6 +417,24 @@ export function snapshotFromDTO(dto: QueueSnapshotDTO): QueueSnapshot {
   };
 }
 
+/**
+ * 未变化任务复用旧对象（tasks 7.3）：热进度更新时只替换有变化的活跃任务，
+ * 已完成任务保持同一引用，避免整表重渲染；revision 仍由快照控制。
+ */
+export function reuseUnchangedTasks(
+  previous: QueueTask[] | undefined,
+  next: QueueTask[],
+): QueueTask[] {
+  if (!previous || previous.length === 0) return next;
+  const byId = new Map(previous.map((task) => [task.id, task]));
+  return next.map((task) => {
+    const old = byId.get(task.id);
+    // updatedAt 在 core 侧随进度/阶段变化更新；相同则说明该任务本帧无变化。
+    if (old && old.updatedAt === task.updatedAt && old.phase === task.phase) return old;
+    return task;
+  });
+}
+
 export function snapshotToDTO(tasks: QueueTask[], account: AccountState, revision: number): QueueSnapshotDTO {
   return {
     revision,
