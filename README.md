@@ -153,6 +153,13 @@ cargo test -p bilidown-app
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+首屏必载 JS 统计（构建后运行，递归统计静态 import，动态页面/面板不计入）：
+
+```bash
+pnpm build:web
+node scripts/measure-first-load.mjs web/dist
+```
+
 ### 构建安装包
 
 ```bash
