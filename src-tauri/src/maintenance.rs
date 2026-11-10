@@ -225,11 +225,13 @@ fn clear_dir(dir: &Path, keep_newest: bool) -> (u64, u64) {
 
 #[tauri::command]
 pub async fn clear_app_cache(
+    app: AppHandle,
     state: State<'_, ShellState>,
     target: String,
 ) -> CommandResult<ClearResultDTO> {
     let targets = CleanTarget::parse(target.trim())
         .ok_or_else(|| AppErrorDTO::new("invalid-argument", format!("未知清理目标: {target}")))?;
+    let clears_covers = targets.contains(&CleanTarget::Covers);
     let core = state.core().await.map_err(AppErrorDTO::from)?;
     let paths = core.paths.clone();
     let root = std::fs::canonicalize(paths.root())
@@ -265,6 +267,10 @@ pub async fn clear_app_cache(
     .map_err(|e| AppErrorDTO::new("unknown", format!("清理任务失败: {e}")))?
     .map_err(|e| AppErrorDTO::new("unknown", e))?;
 
+    if clears_covers {
+        // 前端据此失效内存图片缓存（design D11/7.7）。
+        crate::events::emit(&app, crate::events::COVERS_CLEARED, ());
+    }
     Ok(ClearResultDTO {
         freed_bytes: result.0,
         removed_files: result.1,

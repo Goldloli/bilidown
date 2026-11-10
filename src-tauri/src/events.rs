@@ -27,6 +27,8 @@ pub const SHELL_DROP: &str = "shell://drop";
 pub const SHELL_QUIT_REQUESTED: &str = "shell://quit-requested";
 /// core 启动阶段（payload: CoreStatusDTO，design D5/5.2/5.4）
 pub const CORE_STATUS: &str = "shell://core-status";
+/// 封面缓存已清理（payload: 无；前端失效内存图片缓存，design D11/7.7）
+pub const COVERS_CLEARED: &str = "covers://cleared";
 
 pub fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
     if let Err(err) = app.emit(event, payload) {
