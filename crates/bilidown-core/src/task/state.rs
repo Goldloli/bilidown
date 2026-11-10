@@ -710,4 +710,8 @@ pub enum WorkerEvent {
         result: crate::api::error::BiliResult<TaskOutcome>,
         paused: bool,
     },
+    /// 取消/移除后等待 worker 收敛的上限已到（design D2）：actor 收到后终止并回收 worker。
+    Converge {
+        id: TaskId,
+    },
 }

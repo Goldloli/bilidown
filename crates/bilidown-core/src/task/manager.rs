@@ -37,6 +37,13 @@ const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_secs(3);
 const EVENT_CAPACITY: usize = 512;
 /// 退出时等待 worker 的上限。
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
+/// 取消/移除后等待 worker 自行结束的上限；超时后终止并确认结束再清理（design D2）。
+const CANCEL_CONVERGE: Duration = Duration::from_secs(3);
+/// 任务临时目录清理失败后的重试间隔与次数上限（design D1）。
+const CLEANUP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const CLEANUP_MAX_ATTEMPTS: u32 = 3;
+/// 待重试清理队列上限，避免异常文件系统下无限增长。
+const PENDING_CLEANUP_CAP: usize = 32;
 
 /// manager 构造配置。
 pub struct TaskManagerConfig {
@@ -140,6 +147,10 @@ impl TaskManager {
             order: Vec::new(),
             controls: HashMap::new(),
             workers: HashMap::new(),
+            temp_dirs: HashMap::new(),
+            tails: HashMap::new(),
+            pending_cleanups: Vec::new(),
+            last_cleanup_retry: Instant::now(),
             sem: Arc::new(Semaphore::new(MAX_CONCURRENT)),
             reduction_permits: Vec::new(),
             dirty: HashSet::new(),
@@ -363,6 +374,13 @@ struct Inner {
     order: Vec<TaskId>,
     controls: HashMap<TaskId, WorkerControl>,
     workers: HashMap<TaskId, tokio::task::JoinHandle<()>>,
+    /// 每个任务实际使用的临时目录（worker 启动时确认，供隔离清理；design D1）。
+    temp_dirs: HashMap<TaskId, Vec<PathBuf>>,
+    /// 已移除但 worker 尚未结束的收尾记录：任务临时目录（design D2）。
+    tails: HashMap<TaskId, Vec<PathBuf>>,
+    /// 清理失败、待重试的任务临时目录及已尝试次数。
+    pending_cleanups: Vec<(Vec<PathBuf>, u32)>,
+    last_cleanup_retry: Instant,
     sem: Arc<Semaphore>,
     reduction_permits: Vec<OwnedSemaphorePermit>,
     dirty: HashSet<TaskId>,
@@ -404,6 +422,7 @@ impl Inner {
                 }
                 _ = ticker.tick() => {
                     self.flush_progress_if_due().await;
+                    self.retry_pending_cleanups().await;
                     self.publish_if_due();
                 }
             }
@@ -506,6 +525,9 @@ impl Inner {
             pause: Arc::new(AtomicBool::new(false)),
         };
         self.controls.insert(id.clone(), control.clone());
+        // 记录任务实际使用的临时目录：清理只针对这些路径（design D1）。
+        let temp_dirs = task_temp_dirs(&self.storage, &view, &self.settings);
+        self.temp_dirs.insert(id.clone(), temp_dirs);
         let (reporter, ctx) = {
             let reporter =
                 TaskReporter::new(id.clone(), self.worker_tx.clone(), control.cancel.clone());
@@ -727,7 +749,10 @@ impl Inner {
             control.pause.store(false, Ordering::Relaxed);
             control.cancel.cancel();
             self.set_phase(id, TaskPhase::Cancelled).await?;
-            if !self.workers.contains_key(id) {
+            if self.workers.contains_key(id) {
+                // 取消后最多等待 3 秒；超时由独立监督事件终止 worker 再收尾（design D2）。
+                self.arm_cancel_convergence(id);
+            } else {
                 self.finish_cancelled(id).await;
             }
         } else {
@@ -735,6 +760,19 @@ impl Inner {
             self.finish_cancelled(id).await;
         }
         Ok(())
+    }
+
+    /// 取消/移除后启动独立收敛监督：3 秒内 worker 仍未结束则由 actor 终止并回收（design D2）。
+    fn arm_cancel_convergence(&self, id: &str) {
+        if !self.workers.contains_key(id) {
+            return;
+        }
+        let tx = self.worker_tx.clone();
+        let task_id = id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(CANCEL_CONVERGE).await;
+            let _ = tx.send(WorkerEvent::Converge { id: task_id });
+        });
     }
 
     async fn retry_task(&mut self, id: &str) -> BiliResult<()> {
@@ -772,20 +810,30 @@ impl Inner {
         if !self.tasks.contains_key(id) {
             return Err(BiliError::Other(format!("task not found: {id}")));
         }
+        // design D2：数据库删除成功后才从用户列表移除；失败保留任务行。
+        let db = Arc::clone(self.storage.db());
+        let task_id = id.to_string();
+        spawn_blocking_db(move || db.delete_task(&task_id)).await?;
+        // 先捕获任务实际使用的临时目录，之后的清理不再依赖全局设置或已移除的视图。
+        let dirs = self.take_temp_dirs(id);
         if let Some(control) = self.controls.remove(id) {
             control.pause.store(false, Ordering::Relaxed);
             control.cancel.cancel();
         }
-        self.workers.remove(id);
+        let running = self.workers.contains_key(id);
+        if running {
+            // worker 仍在运行：保留收尾记录，确认 worker 结束后再清理由 Finished/Converge 处理。
+            self.tails.insert(id.to_string(), dirs);
+            self.arm_cancel_convergence(id);
+        } else {
+            self.cleanup_dirs_now(dirs).await;
+        }
         self.tasks.remove(id);
         self.order.retain(|x| x != id);
         self.dirty.remove(id);
-        self.cleanup_temp(id).await;
-        let db = Arc::clone(self.storage.db());
-        let task_id = id.to_string();
-        let _ = spawn_blocking_db(move || db.delete_task(&task_id)).await;
         self.emit(TaskEvent::Removed { id: id.to_string() });
         self.publish();
+        self.schedule();
         Ok(())
     }
 
@@ -801,19 +849,26 @@ impl Inner {
             })
             .cloned()
             .collect();
+        let mut removed = 0usize;
         for id in &ids {
+            let db = Arc::clone(self.storage.db());
+            let task_id = id.clone();
+            // design D2/3.7：删除成功后才发布移除；失败保留记录并暴露诊断。
+            if let Err(error) = spawn_blocking_db(move || db.delete_task(&task_id)).await {
+                tracing::warn!(task = %id, error = %error, "删除已完成任务失败，保留队列记录");
+                continue;
+            }
             self.tasks.remove(id);
             self.controls.remove(id);
             self.dirty.remove(id);
-            let db = Arc::clone(self.storage.db());
-            let task_id = id.clone();
-            let _ = spawn_blocking_db(move || db.delete_task(&task_id)).await;
+            self.cleanup_temp(id).await;
             self.emit(TaskEvent::Removed { id: id.clone() });
+            removed += 1;
         }
         self.order.retain(|id| self.tasks.contains_key(id));
         self.emit(TaskEvent::QueueChanged);
         self.publish();
-        ids.len()
+        removed
     }
 
     fn apply_settings(&mut self, settings: Settings) -> BiliResult<()> {
@@ -876,7 +931,12 @@ impl Inner {
                 }
             }
             WorkerEvent::Output { id, artifact, ack } => {
-                let result = self.record_artifact(&id, artifact).await;
+                // 已移除任务不再写入任务记录：立即以取消错误结束 checkpoint，避免 worker 悬挂（design D2）。
+                let result = if self.tasks.contains_key(&id) {
+                    self.record_artifact(&id, artifact).await
+                } else {
+                    Err(BiliError::Cancelled)
+                };
                 let _ = ack.send(result);
             }
             WorkerEvent::Finished { id, result, paused } => {
@@ -884,11 +944,49 @@ impl Inner {
                 self.controls.remove(&id);
                 self.enforce_permits();
                 if !self.tasks.contains_key(&id) {
-                    // 任务已被 remove：清理临时文件即可
-                    self.cleanup_temp(&id).await;
+                    // 任务已移除且 worker 已确认结束：清理收尾记录并继续调度（design D2）。
+                    let dirs = self.tails.remove(&id).unwrap_or_default();
+                    self.temp_dirs.remove(&id);
+                    if !dirs.is_empty() {
+                        self.cleanup_dirs_now(dirs).await;
+                    }
+                    self.schedule();
+                    self.publish();
                     return;
                 }
                 self.handle_finished(&id, result, paused).await;
+                self.schedule();
+                self.publish();
+            }
+            WorkerEvent::Converge { id } => {
+                // 3 秒仍未结束：终止 worker，确认结束后再清理（design D2）。
+                let Some(handle) = self.workers.remove(&id) else {
+                    return;
+                };
+                handle.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+                self.controls.remove(&id);
+                self.enforce_permits();
+                let tail = self.tails.remove(&id);
+                self.temp_dirs.remove(&id);
+                if let Some(dirs) = tail {
+                    // 任务已移除：只清理其收尾记录中的临时目录，已发布文件保留。
+                    self.cleanup_dirs_now(dirs).await;
+                } else if self.tasks.contains_key(&id) {
+                    // 用户取消但 worker 未自行结束：在此完成取消收尾。
+                    self.dirty.remove(&id);
+                    {
+                        let view = self.tasks.get_mut(&id).expect("task exists");
+                        view.phase = TaskPhase::Cancelled;
+                        view.speed_bps = 0.0;
+                        view.progress.stage = DownloadStage::Idle;
+                        view.touch();
+                    }
+                    self.cleanup_temp(&id).await;
+                    self.persist_view(&id).await;
+                    self.write_history(&id, "cancelled").await;
+                    self.emit(TaskEvent::Cancelled { id: id.clone() });
+                }
                 self.schedule();
                 self.publish();
             }
@@ -1167,25 +1265,92 @@ impl Inner {
         self.emit(TaskEvent::HistoryChanged);
     }
 
-    async fn cleanup_temp(&self, id: &str) {
-        // 应用缓存目录 + 输出目录下的同卷临时任务目录都清理（成功/取消/移除）
-        let mut dirs: Vec<PathBuf> = vec![self.storage.tmp_dir().join(id)];
+    /// 取出任务启动时确认的临时目录；没有记录时按当前视图推算（旧数据/恢复任务）。
+    fn take_temp_dirs(&mut self, id: &str) -> Vec<PathBuf> {
+        self.temp_dirs
+            .remove(id)
+            .unwrap_or_else(|| self.compute_temp_dirs(id))
+    }
+
+    fn compute_temp_dirs(&self, id: &str) -> Vec<PathBuf> {
+        let mut dirs = vec![self.storage.tmp_dir().join(id)];
         if let Some(view) = self.tasks.get(id) {
-            let out = view
-                .spec
-                .output_dir
-                .clone()
-                .unwrap_or_else(|| self.settings.effective_download_dir());
-            let parent = out.join(".bilidown-tmp");
-            dirs.push(parent.join(id));
-            dirs.push(parent);
+            dirs.push(
+                view.spec
+                    .output_dir
+                    .clone()
+                    .unwrap_or_else(|| self.settings.effective_download_dir())
+                    .join(".bilidown-tmp")
+                    .join(id),
+            );
         }
-        let _ = tokio::task::spawn_blocking(move || {
-            for dir in &dirs {
-                let _ = std::fs::remove_dir_all(dir);
+        dirs
+    }
+
+    async fn cleanup_temp(&mut self, id: &str) {
+        let dirs = self.take_temp_dirs(id);
+        self.cleanup_dirs_now(dirs).await;
+    }
+
+    /// 只清理传入的任务专属目录；失败记录并排队重试，绝不扩大清理范围（design D1）。
+    async fn cleanup_dirs_now(&mut self, dirs: Vec<PathBuf>) {
+        if dirs.is_empty() {
+            return;
+        }
+        let failures = cleanup_task_dirs(&dirs).await;
+        if failures.is_empty() {
+            return;
+        }
+        for (path, error) in &failures {
+            tracing::warn!(
+                target: "bilidown_core::task",
+                path = %path.display(),
+                error = %error,
+                "清理任务临时目录失败，稍后重试"
+            );
+        }
+        if dirs.len() >= PENDING_CLEANUP_CAP {
+            tracing::warn!(count = dirs.len(), "待重试清理目录过多，丢弃本次重试记录");
+            return;
+        }
+        if let Some((_, attempts)) = self
+            .pending_cleanups
+            .iter_mut()
+            .find(|(pending, _)| pending == &dirs)
+        {
+            *attempts += 1;
+        } else if self.pending_cleanups.len() < PENDING_CLEANUP_CAP {
+            self.pending_cleanups.push((dirs, 1));
+        }
+    }
+
+    /// 按间隔重试失败的任务临时目录清理；不阻塞调度（design D1）。
+    async fn retry_pending_cleanups(&mut self) {
+        if self.pending_cleanups.is_empty()
+            || self.last_cleanup_retry.elapsed() < CLEANUP_RETRY_INTERVAL
+        {
+            return;
+        }
+        self.last_cleanup_retry = Instant::now();
+        let pending = std::mem::take(&mut self.pending_cleanups);
+        for (dirs, attempts) in pending {
+            let failures = cleanup_task_dirs(&dirs).await;
+            if failures.is_empty() {
+                continue;
             }
-        })
-        .await;
+            if attempts >= CLEANUP_MAX_ATTEMPTS {
+                for (path, error) in &failures {
+                    tracing::warn!(
+                        target: "bilidown_core::task",
+                        path = %path.display(),
+                        error = %error,
+                        "清理任务临时目录最终失败，保留诊断"
+                    );
+                }
+                continue;
+            }
+            self.pending_cleanups.push((dirs, attempts + 1));
+        }
     }
 
     // ---- 退出 ----
@@ -1213,6 +1378,79 @@ impl Inner {
             }
         }
         self.controls.clear();
+    }
+}
+
+/// 任务拥有的临时目录：应用缓存下的任务目录 + 任务实际输出目录下的同卷临时目录。
+fn task_temp_dirs(storage: &Storage, view: &TaskView, settings: &Settings) -> Vec<PathBuf> {
+    let output_dir = view
+        .spec
+        .output_dir
+        .clone()
+        .unwrap_or_else(|| settings.effective_download_dir());
+    vec![
+        storage.tmp_dir().join(&view.id),
+        output_dir.join(".bilidown-tmp").join(&view.id),
+    ]
+}
+
+/// 只递归删除传入的任务专属目录；共享父目录 `.bilidown-tmp` 仅在其为空时非递归移除。
+/// 不跟随目标路径上的符号链接扩大清理范围，也不删除任何已发布产物（design D1）。
+async fn cleanup_task_dirs(dirs: &[PathBuf]) -> Vec<(PathBuf, std::io::Error)> {
+    let dirs = dirs.to_vec();
+    match tokio::task::spawn_blocking(move || {
+        let mut failures = Vec::new();
+        for dir in &dirs {
+            match std::fs::symlink_metadata(dir) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    if let Err(error) = std::fs::remove_file(dir) {
+                        failures.push((dir.clone(), error));
+                    }
+                }
+                Ok(meta) if meta.is_dir() => {
+                    if let Err(error) = std::fs::remove_dir_all(dir) {
+                        failures.push((dir.clone(), error));
+                    }
+                }
+                Ok(_) => {
+                    if let Err(error) = std::fs::remove_file(dir) {
+                        failures.push((dir.clone(), error));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => failures.push((dir.clone(), error)),
+            }
+        }
+        // 共享父目录只在为空时移除；非空表示其他任务仍在使用，视为正常保留。
+        for dir in &dirs {
+            let Some(parent) = dir.parent() else { continue };
+            if !parent
+                .file_name()
+                .is_some_and(|name| name == ".bilidown-tmp")
+            {
+                continue;
+            }
+            match std::fs::remove_dir(parent) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::DirectoryNotEmpty
+                            | std::io::ErrorKind::PermissionDenied
+                    ) => {}
+                Err(error) => failures.push((parent.to_path_buf(), error)),
+            }
+        }
+        failures
+    })
+    .await
+    {
+        Ok(failures) => failures,
+        Err(error) => vec![(
+            PathBuf::from("<cleanup>"),
+            std::io::Error::other(error.to_string()),
+        )],
     }
 }
 
@@ -1965,6 +2203,327 @@ mod tests {
         let snap = h.manager.snapshot();
         assert_eq!(snap.tasks.len(), 1);
         assert!(!snap.tasks.iter().any(|t| t.id == second || t.id == queued));
+        h.manager.shutdown().await.unwrap();
+    }
+
+    fn spec_in(bvid: &str, dir: &std::path::Path) -> TaskSpec {
+        let mut s = spec(bvid);
+        s.output_dir = Some(dir.to_path_buf());
+        s
+    }
+
+    /// 轮询等待条件成立，返回等待耗时。
+    async fn wait_until<F: FnMut() -> bool>(mut f: F, label: &str) -> Duration {
+        let start = Instant::now();
+        for _ in 0..600 {
+            if f() {
+                return start.elapsed();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timeout waiting for {label}");
+    }
+
+    #[tokio::test]
+    async fn cleanup_targets_only_the_task_that_finished() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(Settings::default(), behavior).await;
+        let out = h._dir.path().join("shared-out");
+        let ids = h
+            .manager
+            .enqueue(vec![spec_in("BVA", &out), spec_in("BVB", &out)])
+            .await
+            .unwrap();
+        let (task_a, task_b) = (ids[0].clone(), ids[1].clone());
+        wait_for(&h.manager, |s| {
+            s.tasks.len() == 2 && s.tasks.iter().all(|t| t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        let parent = out.join(".bilidown-tmp");
+        for id in [&task_a, &task_b] {
+            let dir = parent.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("entry-0.video.m4s"), b"breakpoint-data").unwrap();
+        }
+        // 取消 A：只允许删除 A 自己的临时目录（旧实现会递归删除共享父目录，导致 B 断点消失）。
+        h.manager.cancel(&task_a).await.unwrap();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_a && t.phase == TaskPhase::Cancelled)
+        })
+        .await;
+        wait_until(|| !parent.join(&task_a).exists(), "A 任务临时目录被清理").await;
+        assert_eq!(
+            std::fs::read(parent.join(&task_b).join("entry-0.video.m4s")).unwrap(),
+            b"breakpoint-data",
+            "B 的断点数据必须保持完整"
+        );
+        // 暂停 B 后，再对 A 做清理动作也不得破坏 B 的断点。
+        h.manager.pause(&task_b).await.unwrap();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_b && t.phase == TaskPhase::Paused)
+        })
+        .await;
+        assert!(parent.join(&task_b).join("entry-0.video.m4s").exists());
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn removing_running_task_schedules_next_queued() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(
+            Settings {
+                max_concurrent: 1,
+                ..Default::default()
+            },
+            behavior,
+        )
+        .await;
+        let task_a = h.manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        let task_b = h.manager.enqueue(vec![spec("BV2")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_a && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        h.manager.remove(&task_a).await.unwrap();
+        // 移除运行任务后释放并发资源并自动调度下一项，无需用户再次点击开始。
+        wait_for(&h.manager, |s| {
+            s.tasks.len() == 1
+                && s.tasks
+                    .iter()
+                    .any(|t| t.id == task_b && t.phase.is_active())
+        })
+        .await;
+        assert!(h.manager.snapshot().tasks.iter().all(|t| t.id != task_a));
+        h.manager.cancel(&task_b).await.unwrap();
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn removed_task_late_worker_events_do_not_resurrect() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(Settings::default(), behavior).await;
+        let task_a = h.manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_a && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        h.manager.remove(&task_a).await.unwrap();
+        assert!(h.manager.snapshot().tasks.is_empty());
+        // worker 的迟到进度/阶段/产物事件不得重建任务或写回任务记录。
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(h.manager.snapshot().tasks.is_empty(), "迟到事件不得复活已移除任务");
+        h.manager.flush().await.unwrap();
+        assert_eq!(h.storage.db().load_tasks().unwrap().len(), 0);
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_worker_is_terminated_after_convergence_window() {
+        let mut behavior = behavior_default();
+        // 长 delay 期间不响应取消，模拟卡住的 worker。
+        behavior.delay_ms = 10_000;
+        let h = harness(Settings::default(), behavior).await;
+        let task_a = h.manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_a && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        h.manager.cancel(&task_a).await.unwrap();
+        // 历史写入发生在 worker 收敛之后，用来证明超时后确实被终止并收尾。
+        let elapsed = wait_until(
+            || {
+                h.storage
+                    .db()
+                    .list_history(&Default::default())
+                    .map(|rows| rows.iter().any(|r| r.status == "cancelled"))
+                    .unwrap_or(false)
+            },
+            "取消收敛后写入历史",
+        )
+        .await;
+        assert!(
+            elapsed >= CANCEL_CONVERGE - Duration::from_millis(200),
+            "收敛过早（{elapsed:?}），未覆盖超时路径"
+        );
+        assert!(elapsed < Duration::from_secs(6), "收敛过慢：{elapsed:?}");
+        assert_eq!(h.manager.snapshot().tasks[0].phase, TaskPhase::Cancelled);
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_uses_task_owned_dir_after_download_dir_changes() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(Settings::default(), behavior).await;
+        let old_dir = h._dir.path().join("downloads");
+        let task_a = h.manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_a && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        let old_task_dir = old_dir.join(".bilidown-tmp").join(&task_a);
+        std::fs::create_dir_all(&old_task_dir).unwrap();
+        std::fs::write(old_task_dir.join("entry-0.video.m4s"), b"x").unwrap();
+        let new_dir = h._dir.path().join("new-downloads");
+        let settings = Settings {
+            download_dir: Some(new_dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        h.manager.set_settings(settings).await.unwrap();
+        h.manager.cancel(&task_a).await.unwrap();
+        wait_until(|| !old_task_dir.exists(), "按任务实际目录清理旧下载目录里的断点").await;
+        assert!(!new_dir.join(".bilidown-tmp").join(&task_a).exists());
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_failure_is_retried_without_blocking_schedule() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(
+            Settings {
+                max_concurrent: 1,
+                ..Default::default()
+            },
+            behavior,
+        )
+        .await;
+        let task_a = h.manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        let task_b = h.manager.enqueue(vec![spec("BV2")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_a && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        let downloads = h._dir.path().join("downloads");
+        let task_dir = downloads.join(".bilidown-tmp").join(&task_a);
+        std::fs::create_dir_all(task_dir.join("nested")).unwrap();
+        std::fs::write(task_dir.join("nested/part.m4s"), b"x").unwrap();
+        let mut perms = std::fs::metadata(&task_dir).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&task_dir, perms).unwrap();
+        h.manager.cancel(&task_a).await.unwrap();
+        // 清理失败不得阻塞调度：B 仍然自动开始。
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_b && t.phase.is_active())
+        })
+        .await;
+        assert!(task_dir.exists(), "清理失败时保留目录等待重试");
+        let mut perms = std::fs::metadata(&task_dir).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&task_dir, perms).unwrap();
+        wait_until(|| !task_dir.exists(), "恢复权限后重试清理成功").await;
+        h.manager.cancel(&task_b).await.unwrap();
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_does_not_follow_symlinked_task_temp_dir() {
+        let mut behavior = behavior_default();
+        behavior.wait_for_cancel = true;
+        let h = harness(Settings::default(), behavior).await;
+        let out = h._dir.path().join("out");
+        let task_a = h
+            .manager
+            .enqueue(vec![spec_in("BVA", &out)])
+            .await
+            .unwrap()[0]
+            .clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_a && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        let victim = h._dir.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
+        let parent = out.join(".bilidown-tmp");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::os::unix::fs::symlink(&victim, parent.join(&task_a)).unwrap();
+        h.manager.cancel(&task_a).await.unwrap();
+        wait_until(|| !parent.join(&task_a).exists(), "符号链接本身被移除").await;
+        assert!(
+            victim.join("keep.txt").exists(),
+            "清理不得跟随符号链接删除外部目录"
+        );
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_task_cleans_own_temp_and_keeps_published_files() {
+        let mut behavior = behavior_default();
+        behavior.delay_ms = 80;
+        behavior.artifact_count = 1;
+        let h = harness(Settings::default(), behavior).await;
+        let downloads = h._dir.path().join("downloads");
+        let task_a = h.manager.enqueue(vec![spec("BV1")]).await.unwrap()[0].clone();
+        wait_for(&h.manager, |s| {
+            s.tasks
+                .iter()
+                .any(|t| t.id == task_a && t.phase == TaskPhase::Downloading)
+        })
+        .await;
+        let task_dir = downloads.join(".bilidown-tmp").join(&task_a);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("entry-0.video.m4s"), b"x").unwrap();
+        let snap = wait_for(&h.manager, |s| {
+            s.tasks.iter().all(|t| t.phase == TaskPhase::Done)
+        })
+        .await;
+        let artifact = snap.tasks[0].artifacts.first().map(|a| a.path.clone());
+        wait_until(|| !task_dir.exists(), "完成任务临时目录被清理").await;
+        if let Some(path) = artifact {
+            assert!(
+                std::path::Path::new(&path).exists(),
+                "已发布产物不得因清理被删除"
+            );
+        }
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrency_three_never_exceeds_setting() {
+        let settings = Settings {
+            max_concurrent: 3,
+            ..Default::default()
+        };
+        let mut behavior = behavior_default();
+        behavior.delay_ms = 30;
+        let h = harness(settings, behavior).await;
+        let specs: Vec<TaskSpec> = (0..8).map(|i| spec(&format!("BV{i}"))).collect();
+        h.manager.enqueue(specs).await.unwrap();
+        wait_for(&h.manager, |s| {
+            s.tasks.len() == 8 && s.tasks.iter().all(|t| t.phase == TaskPhase::Done)
+        })
+        .await;
+        assert!(
+            h.max_active.load(Ordering::SeqCst) <= 3,
+            "并发超限: {}",
+            h.max_active.load(Ordering::SeqCst)
+        );
+        assert_eq!(h.max_active.load(Ordering::SeqCst), 3);
         h.manager.shutdown().await.unwrap();
     }
 
