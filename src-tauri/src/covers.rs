@@ -23,6 +23,15 @@ type CoverClientCache = Mutex<Option<(Option<String>, reqwest::Client)>>;
 /// 按代理配置复用的图片 HTTP 客户端（不带登录 Cookie，design D11/7.7）。
 static COVER_CLIENT: OnceLock<CoverClientCache> = OnceLock::new();
 
+/// 测试用：当前缓存的代理配置键。
+#[cfg(test)]
+fn cached_cover_proxy() -> Option<Option<String>> {
+    COVER_CLIENT
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .and_then(|guard| guard.as_ref().map(|(key, _)| key.clone()))
+}
+
 fn cover_client(proxy: Option<&str>) -> Option<reqwest::Client> {
     let key = proxy
         .map(str::trim)
@@ -193,7 +202,10 @@ mod tests {
 
     #[test]
     fn recognizes_supported_image_containers() {
-        assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0x00]), Some(("image/jpeg", "jpg")));
+        assert_eq!(
+            sniff(&[0xFF, 0xD8, 0xFF, 0x00]),
+            Some(("image/jpeg", "jpg"))
+        );
         assert_eq!(
             sniff(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]),
             Some(("image/png", "png"))
@@ -208,6 +220,20 @@ mod tests {
     fn rejects_non_image_payloads() {
         assert_eq!(sniff(b"<html>not an image</html>"), None);
         assert_eq!(sniff(b""), None);
+    }
+
+    #[test]
+    fn cover_client_cache_reuses_and_follows_proxy_changes() {
+        // 同一代理复用同一客户端缓存；代理切换后缓存键更新（design D11/7.7）。
+        assert!(cover_client(Some("http://127.0.0.1:7897")).is_some());
+        assert_eq!(
+            cached_cover_proxy(),
+            Some(Some("http://127.0.0.1:7897".to_string()))
+        );
+        assert!(cover_client(None).is_some());
+        assert_eq!(cached_cover_proxy(), Some(None));
+        assert!(cover_client(Some("  ")).is_some());
+        assert_eq!(cached_cover_proxy(), Some(None), "空白代理视为直连");
     }
 
     #[test]

@@ -379,7 +379,6 @@ pub struct ParseResultDTO {
     pub codecs: Option<Vec<CodecOptionDTO>>,
     pub audio_formats: Option<Vec<AudioFormatOptionDTO>>,
     pub audio_qualities: Option<Vec<AudioQualityOptionDTO>>,
-
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1557,12 +1556,12 @@ pub fn apply_settings_patch(patch: &SettingsPatchDTO, previous: &Settings) -> Se
         next.default_quality = quality_qn(value);
     }
     if let Some(value) = &patch.codec {
-        next.default_codec = if value.eq_ignore_ascii_case("best") || value.eq_ignore_ascii_case("auto")
-        {
-            None
-        } else {
-            codec_from_label(value)
-        };
+        next.default_codec =
+            if value.eq_ignore_ascii_case("best") || value.eq_ignore_ascii_case("auto") {
+                None
+            } else {
+                codec_from_label(value)
+            };
     }
     if let Some(value) = &patch.audio_format {
         next.audio_to_mp3 = value.eq_ignore_ascii_case("mp3");
@@ -1856,12 +1855,7 @@ mod tests {
         let artifacts = vec![
             DownloadArtifact::media(PathBuf::from(&path_str), 3, Some(0), Some("P1".into())),
             DownloadArtifact::media(PathBuf::from(&path_str), 3, Some(1), Some("P2".into())),
-            DownloadArtifact::media(
-                dir.join("missing.mp4"),
-                3,
-                Some(2),
-                Some("P3".into()),
-            ),
+            DownloadArtifact::media(dir.join("missing.mp4"), 3, Some(2), Some("P3".into())),
         ];
         let mut probe = FileProbe::default();
         let dtos = artifact_dtos_with(&artifacts, &HashSet::new(), &mut probe);
@@ -2090,12 +2084,8 @@ mod tests {
         let mut view = TaskView::new(spec);
         view.output_path = Some(path.to_string_lossy().into_owned());
         view.artifacts_legacy = true;
-        view.artifacts.push(DownloadArtifact::media(
-            path.clone(),
-            6,
-            None,
-            None,
-        ));
+        view.artifacts
+            .push(DownloadArtifact::media(path.clone(), 6, None, None));
 
         let dto = task_dto(&view, &Settings::default(), 0);
         assert_eq!(dto.artifact_coverage, "legacy-single");
@@ -2153,6 +2143,4 @@ mod tests {
         assert!(dto.episodes[1].is_current);
         assert_eq!(dto.cover_url.as_deref(), Some("https://i0.hdslb.com/s.jpg"));
     }
-
-
 }

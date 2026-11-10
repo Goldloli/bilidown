@@ -23,9 +23,9 @@ use crate::storage::{Db, HistoryRecord, Settings, Storage, TaskRecord};
 use super::event::TaskEvent;
 use super::pipeline::{DownloadPipeline, TaskReporter, TaskRunCtx, TaskRunner};
 use super::state::{
-    ClearOutcome, DownloadArtifact, QueueSnapshot, TaskId, TaskMeta, TaskMetadata, TaskOutcome,
-    TaskPhase, TaskResume, TaskView, TASK_METADATA_VERSION, WorkerEvent, completed_entry_indices,
-    now_ms,
+    ClearOutcome, DownloadArtifact, QueueSnapshot, TASK_METADATA_VERSION, TaskId, TaskMeta,
+    TaskMetadata, TaskOutcome, TaskPhase, TaskResume, TaskView, WorkerEvent,
+    completed_entry_indices, now_ms,
 };
 
 /// 并发上限（设置允许 1–8）。
@@ -316,7 +316,8 @@ impl TaskManager {
 
     /// 最终 shutdown：停止 worker 并退出监督任务；仅在退出准备成功或用户明确放弃后调用。
     pub async fn finalize_shutdown(&self) -> BiliResult<()> {
-        self.call(|reply| ManagerCommand::Shutdown { reply }).await?;
+        self.call(|reply| ManagerCommand::Shutdown { reply })
+            .await?;
         let sup = self.supervisor.clone();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !sup.is_finished() {
@@ -1515,8 +1516,7 @@ impl Inner {
     async fn retry_persistence(&mut self) -> BiliResult<()> {
         let mut first_error: Option<BiliError> = None;
         // 1) 完成事务（任务视图 + 历史 + 裁剪原子提交）
-        let completions: Vec<(TaskId, HistoryRecord)> =
-            self.pending_completion.drain().collect();
+        let completions: Vec<(TaskId, HistoryRecord)> = self.pending_completion.drain().collect();
         for (id, history) in completions {
             let Some(view) = self.tasks.get(&id).cloned() else {
                 continue;
@@ -1532,7 +1532,8 @@ impl Inner {
                     self.emit(TaskEvent::HistoryChanged);
                 }
                 Err(error) => {
-                    self.pending_completion.insert(id.clone(), history_for_retry);
+                    self.pending_completion
+                        .insert(id.clone(), history_for_retry);
                     self.mark_persist_error(&id, &error);
                     tracing::warn!(task = %id, error = %error, "重试完成事务仍失败");
                     first_error.get_or_insert(error);
@@ -2237,6 +2238,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idle_queue_has_no_periodic_wakeups() {
+        let h = harness(Settings::default(), behavior_default()).await;
+        let mut snapshots = h.manager.subscribe_snapshot();
+        snapshots.borrow_and_update();
+        // 空闲且无待办时不得安排周期唤醒（design D10/7.4）。
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1200), snapshots.changed())
+                .await
+                .is_err(),
+            "空闲队列不应周期性发布快照"
+        );
+        // 事件到达后立即恢复响应（无固定 interval 延迟）。
+        h.manager.enqueue(vec![spec("BV1")]).await.unwrap();
+        wait_for(&h.manager, |s| {
+            s.tasks.iter().all(|t| t.phase == TaskPhase::Done)
+        })
+        .await;
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn idle_queue_does_not_republish_snapshot() {
         let h = harness(Settings::default(), behavior_default()).await;
         let mut snapshots = h.manager.subscribe_snapshot();
@@ -2675,7 +2697,10 @@ mod tests {
         assert!(h.manager.snapshot().tasks.is_empty());
         // worker 的迟到进度/阶段/产物事件不得重建任务或写回任务记录。
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(h.manager.snapshot().tasks.is_empty(), "迟到事件不得复活已移除任务");
+        assert!(
+            h.manager.snapshot().tasks.is_empty(),
+            "迟到事件不得复活已移除任务"
+        );
         h.manager.flush().await.unwrap();
         assert_eq!(h.storage.db().load_tasks().unwrap().len(), 0);
         h.manager.shutdown().await.unwrap();
@@ -2739,7 +2764,11 @@ mod tests {
         };
         h.manager.set_settings(settings).await.unwrap();
         h.manager.cancel(&task_a).await.unwrap();
-        wait_until(|| !old_task_dir.exists(), "按任务实际目录清理旧下载目录里的断点").await;
+        wait_until(
+            || !old_task_dir.exists(),
+            "按任务实际目录清理旧下载目录里的断点",
+        )
+        .await;
         assert!(!new_dir.join(".bilidown-tmp").join(&task_a).exists());
         h.manager.shutdown().await.unwrap();
     }
@@ -2797,12 +2826,7 @@ mod tests {
         behavior.wait_for_cancel = true;
         let h = harness(Settings::default(), behavior).await;
         let out = h._dir.path().join("out");
-        let task_a = h
-            .manager
-            .enqueue(vec![spec_in("BVA", &out)])
-            .await
-            .unwrap()[0]
-            .clone();
+        let task_a = h.manager.enqueue(vec![spec_in("BVA", &out)]).await.unwrap()[0].clone();
         wait_for(&h.manager, |s| {
             s.tasks
                 .iter()
@@ -2880,7 +2904,10 @@ mod tests {
         h.manager.shutdown().await.unwrap();
     }
 
-    fn restart_with(h: &Harness, behavior: MockBehavior) -> std::pin::Pin<Box<dyn std::future::Future<Output = TaskManager> + '_>> {
+    fn restart_with(
+        h: &Harness,
+        behavior: MockBehavior,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = TaskManager> + '_>> {
         let storage = Arc::clone(&h.storage);
         let settings = h.settings.clone();
         let runner = Arc::new(MockRunner {
@@ -2940,7 +2967,9 @@ mod tests {
         .await;
         h.manager.pause(&id).await.unwrap();
         wait_for(&h.manager, |s| {
-            s.tasks.iter().any(|t| t.id == id && t.phase == TaskPhase::Paused)
+            s.tasks
+                .iter()
+                .any(|t| t.id == id && t.phase == TaskPhase::Paused)
         })
         .await;
         h.manager.shutdown().await.unwrap();
@@ -2982,7 +3011,11 @@ mod tests {
             .await
             .unwrap();
             let snap = manager.snapshot();
-            assert_eq!(snap.tasks.len(), 1, "元信息损坏/未知不得丢弃任务：{metadata}");
+            assert_eq!(
+                snap.tasks.len(),
+                1,
+                "元信息损坏/未知不得丢弃任务：{metadata}"
+            );
             assert_eq!(snap.tasks[0].title, "可恢复任务");
             assert!(snap.tasks[0].upper.is_empty(), "不得伪造作者：{metadata}");
             manager.shutdown().await.unwrap();
@@ -2999,10 +3032,7 @@ mod tests {
             Some(Arc::clone(&fail)),
         )
         .await;
-        let result = h
-            .manager
-            .enqueue(vec![spec("BV1"), spec("BV2")])
-            .await;
+        let result = h.manager.enqueue(vec![spec("BV1"), spec("BV2")]).await;
         assert!(result.is_err(), "写库失败必须返回错误");
         assert!(h.manager.snapshot().tasks.is_empty(), "不得发布部分任务");
         assert_eq!(h.storage.db().load_tasks().unwrap().len(), 0);
@@ -3043,7 +3073,9 @@ mod tests {
         let snap = h.manager.snapshot();
         let task = snap.tasks.iter().find(|t| t.id == id).unwrap();
         assert!(
-            task.persist_error.as_deref().is_some_and(|e| e.contains("保存失败")),
+            task.persist_error
+                .as_deref()
+                .is_some_and(|e| e.contains("保存失败")),
             "进度保存失败必须可见：{:?}",
             task.persist_error
         );
@@ -3086,14 +3118,27 @@ mod tests {
         })
         .await;
         assert!(
-            snap.tasks[0].persist_error.as_deref().is_some_and(|e| e.contains("保存失败")),
+            snap.tasks[0]
+                .persist_error
+                .as_deref()
+                .is_some_and(|e| e.contains("保存失败")),
             "完成事务失败必须可见"
         );
-        assert_eq!(h.storage.db().history_count().unwrap(), 0, "失败时历史不得半写");
+        assert_eq!(
+            h.storage.db().history_count().unwrap(),
+            0,
+            "失败时历史不得半写"
+        );
         h.manager.retry_persistence().await.unwrap();
         assert_eq!(h.storage.db().history_count().unwrap(), 1);
         wait_until(
-            || h.manager.snapshot().tasks.iter().all(|t| t.persist_error.is_none()),
+            || {
+                h.manager
+                    .snapshot()
+                    .tasks
+                    .iter()
+                    .all(|t| t.persist_error.is_none())
+            },
             "完成事务重试后清除错误",
         )
         .await;
@@ -3115,7 +3160,13 @@ mod tests {
         })
         .await;
         wait_until(
-            || h.manager.snapshot().tasks.iter().any(|t| t.persist_error.is_some()),
+            || {
+                h.manager
+                    .snapshot()
+                    .tasks
+                    .iter()
+                    .any(|t| t.persist_error.is_some())
+            },
             "失败历史写入错误可见",
         )
         .await;
@@ -3139,7 +3190,10 @@ mod tests {
         })
         .await;
         h.storage.db().fail_bulk_insert_at(0);
-        assert!(h.manager.prepare_shutdown().await.is_err(), "保存失败必须返回错误");
+        assert!(
+            h.manager.prepare_shutdown().await.is_err(),
+            "保存失败必须返回错误"
+        );
         assert_eq!(h.manager.snapshot().tasks.len(), 1, "失败时不得丢弃状态");
         // 重试成功后可以正常准备并最终退出。
         h.manager.retry_persistence().await.unwrap();
@@ -3169,8 +3223,12 @@ mod tests {
                     .clone(),
             );
         }
-        let (running, queued, paused, cancelled) =
-            (ids[0].clone(), ids[1].clone(), ids[2].clone(), ids[3].clone());
+        let (running, queued, paused, cancelled) = (
+            ids[0].clone(),
+            ids[1].clone(),
+            ids[2].clone(),
+            ids[3].clone(),
+        );
         wait_for(&h.manager, |s| {
             s.tasks
                 .iter()
@@ -3179,7 +3237,9 @@ mod tests {
         .await;
         h.manager.pause(&paused).await.unwrap();
         wait_for(&h.manager, |s| {
-            s.tasks.iter().any(|t| t.id == paused && t.phase == TaskPhase::Paused)
+            s.tasks
+                .iter()
+                .any(|t| t.id == paused && t.phase == TaskPhase::Paused)
         })
         .await;
         h.manager.cancel(&cancelled).await.unwrap();
@@ -3271,7 +3331,9 @@ mod tests {
         );
         manager.enable_scheduling().await.unwrap();
         wait_for(&manager, |s| {
-            s.tasks.iter().any(|t| t.id == id && t.phase.is_active() || t.phase == TaskPhase::Done)
+            s.tasks
+                .iter()
+                .any(|t| t.id == id && t.phase.is_active() || t.phase == TaskPhase::Done)
         })
         .await;
         manager.shutdown().await.unwrap();

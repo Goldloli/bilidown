@@ -4,9 +4,9 @@
 //! 增量迁移，不重建表、不丢数据（design D4）。
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -446,10 +446,24 @@ fn write_task(conn: &Connection, rec: &TaskRecord) -> rusqlite::Result<()> {
             restored=excluded.restored, sort_index=excluded.sort_index,
             updated_at=excluded.updated_at",
         params![
-            rec.id, rec.status, rec.phase, rec.source_kind, rec.source_id, rec.title,
-            rec.cover_url, rec.page_url, rec.params, rec.progress, rec.output_path,
-            rec.artifacts, rec.metadata, rec.error, rec.restored as i64, rec.sort_index,
-            rec.created_at, rec.updated_at
+            rec.id,
+            rec.status,
+            rec.phase,
+            rec.source_kind,
+            rec.source_id,
+            rec.title,
+            rec.cover_url,
+            rec.page_url,
+            rec.params,
+            rec.progress,
+            rec.output_path,
+            rec.artifacts,
+            rec.metadata,
+            rec.error,
+            rec.restored as i64,
+            rec.sort_index,
+            rec.created_at,
+            rec.updated_at
         ],
     )?;
     Ok(())
@@ -637,7 +651,8 @@ mod tests {
     fn metadata_roundtrip_and_batch_insert_rolls_back_on_failure() {
         let db = Db::open_in_memory().unwrap();
         let mut a = task("a", "done", "done", 1);
-        a.metadata = r#"{"version":1,"upper":"UP主","entries":["P1","P2"],"selected_entries":[1]}"#.into();
+        a.metadata =
+            r#"{"version":1,"upper":"UP主","entries":["P1","P2"],"selected_entries":[1]}"#.into();
         db.upsert_task(&a).unwrap();
         let loaded = db.load_tasks().unwrap();
         assert_eq!(loaded[0].metadata, a.metadata, "元信息需原样往返");

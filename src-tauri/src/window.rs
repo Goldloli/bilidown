@@ -232,7 +232,9 @@ pub fn quit_and_install(app: &AppHandle, installer: PathBuf) {
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
             {
-                Ok(_) => tracing::info!(target: "shell::update", path = %installer.display(), "已启动安装器，应用退出"),
+                Ok(_) => {
+                    tracing::info!(target: "shell::update", path = %installer.display(), "已启动安装器，应用退出")
+                }
                 Err(err) => tracing::warn!(target: "shell::update", error = %err, "启动安装器失败"),
             }
         }

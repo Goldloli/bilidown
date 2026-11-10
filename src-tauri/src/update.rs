@@ -1034,9 +1034,7 @@ pub fn open_update_file_location(
     let path = completed_installer_path(&state)?;
     app.opener()
         .reveal_item_in_dir(&path)
-        .map_err(|error| {
-            format!("{}安装包失败: {error}", crate::platform::REVEAL_LABEL)
-        })
+        .map_err(|error| format!("{}安装包失败: {error}", crate::platform::REVEAL_LABEL))
 }
 
 pub fn open_about_link(app: AppHandle, link: String) -> Result<(), String> {
@@ -1208,17 +1206,14 @@ mod tests {
     #[test]
     fn release_without_matching_assets_is_rejected() {
         let name = expected_name("2.0.0");
-        let url = format!(
-            "https://github.com/Goldloli/bilidown/releases/download/v2.0.0/{name}"
-        );
+        let url = format!("https://github.com/Goldloli/bilidown/releases/download/v2.0.0/{name}");
         let missing_checksum = vec![asset(&name, &url, 1)];
         let err = select_release(&[release("v2.0.0", false, false, missing_checksum)]).unwrap_err();
         assert!(err.contains("SHA256SUMS"));
 
         let wrong_name = expected_name("2.1.0");
-        let wrong_url = format!(
-            "https://github.com/Goldloli/bilidown/releases/download/v2.0.0/{wrong_name}"
-        );
+        let wrong_url =
+            format!("https://github.com/Goldloli/bilidown/releases/download/v2.0.0/{wrong_name}");
         let wrong_version_name = vec![
             asset(&wrong_name, &wrong_url, 1),
             asset(
@@ -1244,7 +1239,10 @@ mod tests {
             format!("{valid}/evil"),
             String::new(),
         ] {
-            assert!(!is_expected_installer(&bad, &version), "should reject {bad}");
+            assert!(
+                !is_expected_installer(&bad, &version),
+                "should reject {bad}"
+            );
         }
     }
 

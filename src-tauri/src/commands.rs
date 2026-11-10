@@ -798,15 +798,13 @@ pub async fn reveal_path(
         invalidate_file_status(core.as_deref(), &path);
         return Err(file_missing_error(&target));
     }
-    app.opener()
-        .reveal_item_in_dir(&target)
-        .map_err(|e| {
-            invalidate_file_status(core.as_deref(), &path);
-            AppErrorDTO::new(
-                "unknown",
-                format!("{}失败: {e}", crate::platform::REVEAL_LABEL),
-            )
-        })
+    app.opener().reveal_item_in_dir(&target).map_err(|e| {
+        invalidate_file_status(core.as_deref(), &path);
+        AppErrorDTO::new(
+            "unknown",
+            format!("{}失败: {e}", crate::platform::REVEAL_LABEL),
+        )
+    })
 }
 
 #[tauri::command]

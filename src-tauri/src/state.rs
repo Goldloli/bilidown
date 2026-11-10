@@ -43,9 +43,9 @@ impl FileStatusCache {
     /// 仅返回仍在 TTL 内的缓存值。
     pub fn lookup(&self, path: &str) -> Option<Option<(bool, u64)>> {
         let entries = self.entries.lock().ok()?;
-        let fresh = entries.get(path).and_then(|(at, value)| {
-            (at.elapsed() < FILE_STATUS_TTL).then_some(*value)
-        });
+        let fresh = entries
+            .get(path)
+            .and_then(|(at, value)| (at.elapsed() < FILE_STATUS_TTL).then_some(*value));
         if fresh.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
         }
@@ -475,7 +475,11 @@ pub(crate) fn spawn_network_phase(app: AppHandle, core: Arc<Core>) {
         match prepared {
             Ok(account_state) => {
                 core.set_account(account_state.clone());
-                events::emit(&app, events::ACCOUNT_CHANGED, dto::account_dto(&account_state));
+                events::emit(
+                    &app,
+                    events::ACCOUNT_CHANGED,
+                    dto::account_dto(&account_state),
+                );
                 events::emit(
                     &app,
                     events::CORE_STATUS,
@@ -565,7 +569,11 @@ async fn resume_network_phase(app: AppHandle, core: Arc<Core>) {
     }
     if let Ok(account_state) = prepared {
         core.set_account(account_state.clone());
-        events::emit(&app, events::ACCOUNT_CHANGED, dto::account_dto(&account_state));
+        events::emit(
+            &app,
+            events::ACCOUNT_CHANGED,
+            dto::account_dto(&account_state),
+        );
         events::emit(
             &app,
             events::CORE_STATUS,
@@ -618,6 +626,21 @@ async fn init_local_core() -> BiliResult<Arc<Core>> {
     }))
 }
 
+/// 菜单是否需要刷新：计数或登录态变化才刷新（design D10/7.5）。
+pub(crate) fn menu_needs_refresh(
+    previous: Option<MenuCounts>,
+    previous_logged_in: Option<bool>,
+    counts: MenuCounts,
+    logged_in: bool,
+) -> bool {
+    previous != Some(counts) || previous_logged_in != Some(logged_in)
+}
+
+/// Dock/App Nap 是否需要更新：运行数量变化才更新（design D10/7.5）。
+pub(crate) fn dock_needs_update(previous: Option<u32>, running: u32) -> bool {
+    previous != Some(running)
+}
+
 /// watch<QueueSnapshot> → `queue://snapshot` + 菜单可用性 + Dock 徽标。
 fn spawn_snapshot_bridge(app: &AppHandle, core: &Arc<Core>) {
     let app = app.clone();
@@ -646,13 +669,13 @@ fn spawn_snapshot_bridge(app: &AppHandle, core: &Arc<Core>) {
                 dto::snapshot_dto(&snapshot, &account, &settings, Some(&core.file_status)),
             );
             let counts = MenuCounts::from_snapshot(&snapshot);
-            if last_counts != Some(counts) || last_logged_in != Some(account.logged_in) {
+            if menu_needs_refresh(last_counts, last_logged_in, counts, account.logged_in) {
                 menu::refresh(&app);
                 last_counts = Some(counts);
                 last_logged_in = Some(account.logged_in);
             }
             let running = snapshot.active_count + snapshot.queued_count;
-            if last_running != Some(running) {
+            if dock_needs_update(last_running, running) {
                 dock::update(&app, running);
                 crate::energy::set_active(running > 0);
                 last_running = Some(running);
@@ -921,6 +944,32 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn system_integration_updates_only_on_visible_change() {
+        let counts = MenuCounts {
+            queued: 1,
+            active: 1,
+            ..Default::default()
+        };
+        // 首次一定刷新/更新；相同状态不重复设置（design D10/7.5）。
+        assert!(menu_needs_refresh(None, None, counts, false));
+        assert!(!menu_needs_refresh(
+            Some(counts),
+            Some(false),
+            counts,
+            false
+        ));
+        assert!(menu_needs_refresh(Some(counts), Some(false), counts, true));
+        let other = MenuCounts {
+            queued: 2,
+            ..counts
+        };
+        assert!(menu_needs_refresh(Some(counts), Some(false), other, false));
+        assert!(dock_needs_update(None, 2));
+        assert!(!dock_needs_update(Some(2), 2));
+        assert!(dock_needs_update(Some(2), 0));
     }
 
     #[test]

@@ -55,13 +55,12 @@ fn main() {
         }))
         .plugin(logging::plugin())
         .plugin({
-            let window_state = tauri_plugin_window_state::Builder::default()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
-                        | tauri_plugin_window_state::StateFlags::FULLSCREEN,
-                );
+            let window_state = tauri_plugin_window_state::Builder::default().with_state_flags(
+                tauri_plugin_window_state::StateFlags::SIZE
+                    | tauri_plugin_window_state::StateFlags::POSITION
+                    | tauri_plugin_window_state::StateFlags::MAXIMIZED
+                    | tauri_plugin_window_state::StateFlags::FULLSCREEN,
+            );
             // macOS / Windows 设置每次相对主窗口定位；主窗口仍恢复原有状态。
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             let window_state = window_state.skip_initial_state("preferences");

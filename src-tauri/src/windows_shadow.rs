@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{HWND, LRESULT, POINT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC,
     HGDIOBJ, SelectObject,
 };
@@ -22,11 +22,11 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, HTTRANSPARENT, IsWindow,
-    IsWindowVisible, MA_NOACTIVATE, RegisterClassExW, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
-    SWP_NOZORDER, SWP_NOSIZE, SW_SHOWNA, SetWindowPos, ShowWindow, ULW_ALPHA,
+    IsWindowVisible, MA_NOACTIVATE, RegisterClassExW, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, ShowWindow, ULW_ALPHA,
     UpdateLayeredWindow, WM_DPICHANGED, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCDESTROY,
     WM_NCHITTEST, WM_SHOWWINDOW, WM_SIZE, WM_WINDOWPOSCHANGED, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP, SW_HIDE,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::windows_chrome::{Outline, read_outline};
@@ -205,11 +205,7 @@ unsafe extern "system" fn owner_subclass_proc(
             shadow.shutdown();
         }
         unsafe {
-            RemoveWindowSubclass(
-                hwnd,
-                Some(owner_subclass_proc),
-                SUBCLASS_ID,
-            );
+            RemoveWindowSubclass(hwnd, Some(owner_subclass_proc), SUBCLASS_ID);
         }
         let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
         drop(shadow);
@@ -244,10 +240,7 @@ unsafe extern "system" fn owner_subclass_proc(
 }
 
 fn should_sync(message: u32) -> bool {
-    matches!(
-        message,
-        WM_WINDOWPOSCHANGED | WM_SIZE | WM_DPICHANGED
-    )
+    matches!(message, WM_WINDOWPOSCHANGED | WM_SIZE | WM_DPICHANGED)
 }
 
 fn handles_owner_message(message: u32) -> bool {
@@ -301,7 +294,8 @@ impl ShadowState {
     }
 
     fn sync_inner(&mut self, visibility_hint: Option<bool>) -> io::Result<()> {
-        let visible = visibility_hint.unwrap_or_else(|| unsafe { IsWindowVisible(self.owner) } != 0);
+        let visible =
+            visibility_hint.unwrap_or_else(|| unsafe { IsWindowVisible(self.owner) } != 0);
         if unsafe { IsWindow(self.owner) } == 0 || !visible {
             self.hide();
             return Ok(());
@@ -424,14 +418,7 @@ impl LayerSurface {
         };
         let mut bits: *mut c_void = null_mut();
         let bitmap = unsafe {
-            CreateDIBSection(
-                hdc,
-                &bitmap_info,
-                DIB_RGB_COLORS,
-                &mut bits,
-                null_mut(),
-                0,
-            )
+            CreateDIBSection(hdc, &bitmap_info, DIB_RGB_COLORS, &mut bits, null_mut(), 0)
         };
         if bitmap.is_null() || bits.is_null() {
             unsafe {
@@ -524,11 +511,19 @@ impl ShadowLayout {
         let margin = scale_pixels(MARGIN_DIP, outline.dpi);
         let width = outline
             .width
-            .checked_add(margin.checked_mul(2).ok_or_else(|| io::Error::other("阴影横向边距溢出"))?)
+            .checked_add(
+                margin
+                    .checked_mul(2)
+                    .ok_or_else(|| io::Error::other("阴影横向边距溢出"))?,
+            )
             .ok_or_else(|| io::Error::other("阴影宽度溢出"))?;
         let height = outline
             .height
-            .checked_add(margin.checked_mul(2).ok_or_else(|| io::Error::other("阴影纵向边距溢出"))?)
+            .checked_add(
+                margin
+                    .checked_mul(2)
+                    .ok_or_else(|| io::Error::other("阴影纵向边距溢出"))?,
+            )
             .ok_or_else(|| io::Error::other("阴影高度溢出"))?;
         let byte_len = (width as usize)
             .checked_mul(height as usize)
@@ -597,8 +592,7 @@ fn rasterize_shadow(layout: ShadowLayout, pixels: &mut [u8]) {
                 radius,
             )
             .max(0.0);
-            let ambient =
-                AMBIENT_ALPHA * (-0.5 * (ambient_distance / ambient_sigma).powi(2)).exp();
+            let ambient = AMBIENT_ALPHA * (-0.5 * (ambient_distance / ambient_sigma).powi(2)).exp();
             let key = KEY_ALPHA * (-0.5 * (key_distance / key_sigma).powi(2)).exp();
             let edge_distance = px
                 .min(py)
@@ -683,11 +677,20 @@ mod tests {
         let window = outline(640, 480, 96);
         let (layout, pixels) = rendered(window);
         for (x, y) in [
-            (layout.margin + window.width / 2, layout.margin + window.height / 2),
+            (
+                layout.margin + window.width / 2,
+                layout.margin + window.height / 2,
+            ),
             (layout.margin + 1, layout.margin + window.height / 2),
-            (layout.margin + window.width - 2, layout.margin + window.height / 2),
+            (
+                layout.margin + window.width - 2,
+                layout.margin + window.height / 2,
+            ),
             (layout.margin + window.width / 2, layout.margin + 1),
-            (layout.margin + window.width / 2, layout.margin + window.height - 2),
+            (
+                layout.margin + window.width / 2,
+                layout.margin + window.height - 2,
+            ),
         ] {
             assert_eq!(alpha_at(layout, &pixels, x, y), 0);
         }
@@ -721,18 +724,19 @@ mod tests {
     fn render_key_ignores_pure_movement_and_changes_for_resize_or_dpi() {
         let base = outline(640, 480, 96);
         assert_eq!(RenderKey::from(base), RenderKey::from(base));
-        assert_ne!(RenderKey::from(base), RenderKey::from(outline(641, 480, 96)));
-        assert_ne!(RenderKey::from(base), RenderKey::from(outline(640, 480, 120)));
+        assert_ne!(
+            RenderKey::from(base),
+            RenderKey::from(outline(641, 480, 96))
+        );
+        assert_ne!(
+            RenderKey::from(base),
+            RenderKey::from(outline(640, 480, 120))
+        );
     }
 
     #[test]
     fn lifecycle_messages_cover_show_move_size_and_dpi() {
-        for message in [
-            WM_SHOWWINDOW,
-            WM_WINDOWPOSCHANGED,
-            WM_SIZE,
-            WM_DPICHANGED,
-        ] {
+        for message in [WM_SHOWWINDOW, WM_WINDOWPOSCHANGED, WM_SIZE, WM_DPICHANGED] {
             assert!(handles_owner_message(message));
         }
         assert!(!handles_owner_message(WM_MOUSEACTIVATE));
