@@ -27,7 +27,11 @@ import { applyGlass } from './glass';
 let booted: Promise<void> | null = null;
 
 export function bootstrapApp(): Promise<void> {
-  booted ??= doBootstrap();
+  // 失败后允许重试：不缓存被拒绝的 promise（tasks 5.1/5.4）。
+  booted ??= doBootstrap().catch((error: unknown) => {
+    booted = null;
+    throw error;
+  });
   return booted;
 }
 

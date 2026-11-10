@@ -1,6 +1,8 @@
 import { createRoot } from 'react-dom/client';
+import { useEffect, useState } from 'react';
 import './styles/app.css';
 import { App } from './App';
+import { BootError } from './components/BootError';
 import { bootstrapApp } from './lib/bootstrap';
 import { devParams } from './dev/scenario';
 import { applyTheme, readThemeOverride, systemTheme } from './lib/theme';
@@ -12,6 +14,7 @@ const params = devParams();
 if (params.qa) {
   document.documentElement.dataset.qa = 'screenshot';
 }
+// 主题/外观在首帧前应用，避免白闪；网络与后端准备不阻塞首屏（tasks 5.1）。
 applyTheme(readThemeOverride() ?? systemTheme());
 applyGlass(readGlassPref());
 applyAccent(readAccentPref());
@@ -19,24 +22,42 @@ const initialMotion = readMotionPref();
 applyMotion(initialMotion);
 watchSystemMotion(initialMotion, () => applyMotion(initialMotion));
 
-const container = document.getElementById('root');
+function Boot() {
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
-async function start() {
-  try {
-    await bootstrapApp();
-  } catch (error) {
-    console.error('[bilidown] bootstrap failed', error);
-    if (container) {
-      container.innerHTML =
-        '<div style="padding:40px;font-family:-apple-system,sans-serif;font-size:13px;color:#b3463f">初始化失败：' +
-        String(error instanceof Error ? error.message : error) +
-        '</div>';
-    }
-    return;
+  useEffect(() => {
+    let alive = true;
+    bootstrapApp().then(
+      () => {
+        if (alive) setError(null);
+      },
+      (reason: unknown) => {
+        if (!alive) return;
+        setError(reason instanceof Error ? reason.message : String(reason));
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [attempt]);
+
+  if (error) {
+    return (
+      <BootError
+        message={error}
+        onRetry={() => {
+          setError(null);
+          setAttempt((value) => value + 1);
+        }}
+      />
+    );
   }
-  if (container) {
-    createRoot(container).render(<App />);
-  }
+  return <App />;
 }
 
-void start();
+const container = document.getElementById('root');
+if (container) {
+  // 先渲染界面骨架（本地内容可用），bootstrap 在后台完成事件订阅与数据加载。
+  createRoot(container).render(<Boot />);
+}
