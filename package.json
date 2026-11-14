@@ -1,7 +1,7 @@
 {
   "name": "bilidown-app",
   "private": true,
-  "version": "2.4.1",
+  "version": "2.5.0",
   "type": "module",
   "scripts": {
     "dev:web": "vite --config web/vite.config.ts",

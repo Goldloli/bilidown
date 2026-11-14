@@ -299,7 +299,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bilidown-app"
-version = "2.4.1"
+version = "2.5.0"
 dependencies = [
  "base64 0.23.1",
  "bilidown-core",

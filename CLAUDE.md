@@ -60,18 +60,24 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+pnpm typecheck && pnpm test && pnpm build:web && pnpm qa:interactions
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+openspec validate --all --strict
+node scripts/version.mjs
 ```
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Rust 核心位于 `crates/bilidown-core/`，Tauri 桌面壳位于 `src-tauri/`，React 界面位于 `web/`。`openspec/specs/` 是行为契约，`AGENTS.md` 是完整协作规范；功能或可见行为变更必须先完成 OpenSpec change 并获得用户确认。
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- 平台差异以 `openspec/specs/` 为准；Windows、macOS 的行为和要求不得互相覆盖。
+- Tauri 前端窗口 API 受 capability 限制；新增或修改相关调用必须同步权限配置并增加回归测试。
+- 下载失败/取消任务手动重试时，先校验并复用有效产物、附加信息和目标任务断点，只重下失败、缺失或失效条目；全部条目有效时直接恢复完成。重试状态持久化成功后才能调度，且不得删除已发布文件。
+- 应用更新 shell/事件进度使用 `0–100`，UI 在统一边界转换为 `0–1` 后展示；缺失进度保持未知。
+- 入队、删除、完成、历史写入与退出保存的持久化失败必须可见且可重试；下载错误必须以可读中文提示展示且不得崩溃。
+- 登录凭据只保存在平台应用数据目录并限制为当前用户可读；cookie 不得写入仓库、工作目录或日志。
+- 发布前必须同步四处版本号并准备 `.github/release-notes/v<版本>.md`；推送版本 tag 后必须同时产出 macOS DMG、Windows NSIS 与唯一 `SHA256SUMS.txt`。

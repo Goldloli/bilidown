@@ -26,7 +26,7 @@ export const AUDIO_QUALITY_TIERS: Array<{ id: number; label: string }> = [
   { id: 30216, label: '64K' },
 ];
 
-export const APP_VERSION = '2.4.1';
+export const APP_VERSION = '2.5.0';
 export const APP_BUILD = 'Tauri 2 · React 19';
 
 export const VIDEO_CODECS: CodecOption[] = [
