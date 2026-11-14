@@ -98,11 +98,10 @@ impl UpdateProxySession {
                 let parsed = ProxyUrl::parse(target.as_str())
                     .map_err(|error| format!("更新目标 URL 非法: {error}"))?;
                 let steps = match &state.resolver {
-                    SystemProxyResolver::Plain(resolver) | SystemProxyResolver::Native(resolver) => {
-                        resolver
-                            .resolve_config(&state.config, &parsed, None)
-                            .map_err(|error| format!("系统代理无法解析更新目标: {error}"))
-                    }
+                    SystemProxyResolver::Plain(resolver)
+                    | SystemProxyResolver::Native(resolver) => resolver
+                        .resolve_config(&state.config, &parsed, None)
+                        .map_err(|error| format!("系统代理无法解析更新目标: {error}")),
                 }?;
                 let routes = routes_from_steps(steps)?;
                 if routes.is_empty() {
@@ -120,15 +119,28 @@ fn load_system_proxy() -> Result<(ProxyConfig, SystemProxyResolver), String> {
         config.effective,
         ProxyMode::Pac { .. } | ProxyMode::WpadAutoDetect
     ) {
-        SystemProxyResolver::Native(
-            PacResolver::new(PacPolicy::new())
-                .with_system_native()
-                .map_err(|error| format!("初始化系统 PAC 解析失败: {error}"))?,
-        )
+        SystemProxyResolver::Native(PacResolver::new(PacPolicy::new()).with_native(
+            native_pac_resolver().map_err(|error| format!("初始化系统 PAC 解析失败: {error}"))?,
+        ))
     } else {
         SystemProxyResolver::Plain(PacResolver::new(PacPolicy::new()))
     };
     Ok((config, resolver))
+}
+
+#[cfg(target_os = "windows")]
+fn native_pac_resolver() -> Result<proxy_watch::pac::NativePacResolver, proxy_watch::Error> {
+    proxy_watch::pac::NativePacResolver::new().map(|resolver| resolver.with_wpad(true))
+}
+
+#[cfg(target_os = "macos")]
+fn native_pac_resolver() -> Result<proxy_watch::pac::NativePacResolver, proxy_watch::Error> {
+    Ok(proxy_watch::pac::NativePacResolver::new().with_wpad(true))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn native_pac_resolver() -> Result<proxy_watch::pac::NativePacResolver, proxy_watch::Error> {
+    Err(proxy_watch::Error::Unsupported)
 }
 
 fn routes_from_steps(steps: Vec<ProxyStep>) -> Result<Vec<ProxyRoute>, String> {
@@ -171,7 +183,10 @@ pub struct UpdateTransport {
 }
 
 impl UpdateTransport {
-    pub async fn from_settings(settings: &Settings, user_agent: &'static str) -> Result<Self, String> {
+    pub async fn from_settings(
+        settings: &Settings,
+        user_agent: &'static str,
+    ) -> Result<Self, String> {
         Ok(Self {
             session: UpdateProxySession::from_settings(settings).await?,
             user_agent,
@@ -235,11 +250,14 @@ impl UpdateTransport {
                 .map_err(|error| format!("创建更新网络客户端失败: {error}"))?;
             let request = client.get(target.clone()).headers(headers.clone());
             let result = match request_timeout {
-                Some(timeout) => tokio::time::timeout(timeout, request.send())
+                Some(timeout) => match tokio::time::timeout(timeout, request.send()).await {
+                    Ok(result) => result.map_err(|error| classify_request_error(&error)),
+                    Err(_) => Err("更新请求超时".to_string()),
+                },
+                None => request
+                    .send()
                     .await
-                    .map_err(|_| "更新请求超时".to_string())?
                     .map_err(|error| classify_request_error(&error)),
-                None => request.send().await.map_err(|error| classify_request_error(&error)),
             };
             match result {
                 Ok(response) => return Ok(response),
@@ -260,8 +278,10 @@ impl UpdateTransport {
                 }
             }
         }
-        Err(last_error.unwrap_or_else(|| format!("{}没有可用路由", self.session.mode_label()))
-            + "，未自动改走直连")
+        Err(
+            last_error.unwrap_or_else(|| format!("{}没有可用路由", self.session.mode_label()))
+                + "，未自动改走直连",
+        )
     }
 }
 
@@ -356,15 +376,15 @@ mod tests {
 
     #[test]
     fn route_conversion_keeps_direct_and_redacts_credentials() {
-        let endpoint = ProxyEndpoint::parse("socks5h://user:secret@proxy.example:1080", 80)
-            .unwrap();
-        let routes = routes_from_steps(vec![
-            ProxyStep::Direct,
-            ProxyStep::Socks5(endpoint),
-        ])
-        .unwrap();
+        let endpoint =
+            ProxyEndpoint::parse("socks5h://user:secret@proxy.example:1080", 80).unwrap();
+        let routes =
+            routes_from_steps(vec![ProxyStep::Direct, ProxyStep::Socks5(endpoint)]).unwrap();
         assert_eq!(routes[0].url, None);
-        assert_eq!(routes[1].url.as_deref(), Some("socks5h://user:secret@proxy.example:1080"));
+        assert_eq!(
+            routes[1].url.as_deref(),
+            Some("socks5h://user:secret@proxy.example:1080")
+        );
         assert!(!routes[1].label.contains("user"));
         assert!(!routes[1].label.contains("secret"));
     }
@@ -441,8 +461,8 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("更新手动代理"));
-        assert!(error.contains("未自动改走直连"));
+        assert!(error.contains("更新手动代理"), "actual error: {error}");
+        assert!(error.contains("未自动改走直连"), "actual error: {error}");
     }
 
     #[test]
