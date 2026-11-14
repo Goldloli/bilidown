@@ -672,6 +672,11 @@ export function defaultInternalSettings(): Settings {
       proxyPort: 7890,
       proxyUser: '',
       proxyPass: '',
+      updateProxyMode: 'system',
+      updateProxyHost: '',
+      updateProxyPort: 7890,
+      updateProxyUser: '',
+      updateProxyPass: '',
     },
   };
 }
@@ -741,6 +746,11 @@ export function settingsFromDTO(dto: SettingsDTO, prev?: Settings | null): Adapt
       proxyPort: dto.proxy.port ?? 7890,
       proxyUser: dto.proxy.user ?? '',
       proxyPass: dto.proxy.pass ?? '',
+      updateProxyMode: dto.updateProxy.mode,
+      updateProxyHost: dto.updateProxy.host ?? '',
+      updateProxyPort: dto.updateProxy.port ?? 7890,
+      updateProxyUser: dto.updateProxy.user ?? '',
+      updateProxyPass: dto.updateProxy.pass ?? '',
     },
   };
   return { ...settings, revision: dto.revision };
@@ -764,6 +774,13 @@ export function settingsToDTO(settings: Settings, revision?: number): SettingsDT
       port: settings.network.proxyPort,
       user: settings.network.proxyUser,
       pass: settings.network.proxyPass,
+    },
+    updateProxy: {
+      mode: settings.network.updateProxyMode,
+      host: settings.network.updateProxyHost,
+      port: settings.network.updateProxyPort,
+      user: settings.network.updateProxyUser,
+      pass: settings.network.updateProxyPass,
     },
     theme: settings.interface.appearance,
     notifications: settings.general.notifyOnComplete,
@@ -873,6 +890,22 @@ export function settingsPatchToDTO(
       };
     }
   }
+  if (
+    network &&
+    (network.updateProxyMode !== undefined ||
+      network.updateProxyHost !== undefined ||
+      network.updateProxyPort !== undefined ||
+      network.updateProxyUser !== undefined ||
+      network.updateProxyPass !== undefined)
+  ) {
+    dto.updateProxy = {
+      mode: network.updateProxyMode ?? base?.network.updateProxyMode ?? 'system',
+      host: network.updateProxyHost ?? base?.network.updateProxyHost ?? '',
+      port: network.updateProxyPort ?? base?.network.updateProxyPort ?? 7890,
+      user: network.updateProxyUser ?? base?.network.updateProxyUser ?? '',
+      pass: network.updateProxyPass ?? base?.network.updateProxyPass ?? '',
+    };
+  }
   return dto;
 }
 
@@ -917,6 +950,13 @@ export function applySettingsPatchDTO(previous: Settings, patch: SettingsPatchDT
       next.network.proxyPass = '';
     }
   }
+  if (patch.updateProxy !== undefined) {
+    next.network.updateProxyMode = patch.updateProxy.mode;
+    next.network.updateProxyHost = (patch.updateProxy.host ?? next.network.updateProxyHost).trim();
+    next.network.updateProxyPort = patch.updateProxy.port ?? next.network.updateProxyPort;
+    next.network.updateProxyUser = patch.updateProxy.user ?? next.network.updateProxyUser;
+    next.network.updateProxyPass = patch.updateProxy.pass ?? next.network.updateProxyPass;
+  }
   if (patch.theme !== undefined) next.interface.appearance = patch.theme;
   if (patch.notifications !== undefined) next.general.notifyOnComplete = patch.notifications;
   if (patch.watchClipboard !== undefined) next.download.clipboardWatch = patch.watchClipboard;
@@ -957,6 +997,18 @@ export function validateSettings(settings: Settings): SettingsValidationIssue[] 
     int(settings.network.proxyPort, 1, 65535, 'network.proxyPort', '端口需在 1–65535 之间');
     if (!settings.network.proxyHost.trim()) {
       issues.push({ path: 'network.proxyHost', message: '请输入代理地址' });
+    }
+  }
+  if (settings.network.updateProxyMode === 'manual') {
+    int(
+      settings.network.updateProxyPort,
+      1,
+      65535,
+      'network.updateProxyPort',
+      '端口需在 1–65535 之间',
+    );
+    if (!settings.network.updateProxyHost.trim()) {
+      issues.push({ path: 'network.updateProxyHost', message: '请输入更新代理地址' });
     }
   }
   if (!Number.isFinite(settings.quality.fixedQuality) || settings.quality.fixedQuality <= 0) {

@@ -939,6 +939,13 @@ pub async fn test_proxy(proxy: ProxyDTO) -> CommandResult<TestProxyResultDTO> {
     }
 }
 
+#[tauri::command]
+pub async fn test_update_proxy(proxy: UpdateProxyDTO) -> CommandResult<TestProxyResultDTO> {
+    crate::update::test_update_proxy(proxy)
+        .await
+        .map_err(|message| AppErrorDTO::new("network", message))
+}
+
 /// 抓取封面并返回 data URL（B 站图床防盗链：带 Referer/UA + 设置代理；
 /// 缓存到 `<appData>/covers/`，失败返回空串，前端回退占位图）。
 #[tauri::command]
@@ -977,12 +984,13 @@ pub async fn check_app_update(
 }
 
 #[tauri::command]
-pub fn start_app_update_download(
+pub async fn start_app_update_download(
     app: AppHandle,
     state: State<'_, crate::update::AppUpdateState>,
     version: String,
 ) -> CommandResult<crate::update::AppUpdateSnapshot> {
     crate::update::start_app_update_download(app, state, version)
+        .await
         .map_err(|message| AppErrorDTO::new("unknown", message))
 }
 

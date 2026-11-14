@@ -75,6 +75,7 @@ export function createSettingsFake(options: SettingsFakeOptions = {}): SettingsF
       return dto(saved, revision);
     },
     testProxy: async () => ({ ok: true, message: '连接成功' }),
+    testUpdateProxy: async () => ({ ok: true, message: '更新连接成功' }),
     on: () => () => {},
   } as unknown as Backend;
 

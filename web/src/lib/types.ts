@@ -306,6 +306,11 @@ export interface NetworkSettings {
   proxyPort: number;
   proxyUser: string;
   proxyPass: string;
+  updateProxyMode: 'system' | 'direct' | 'manual';
+  updateProxyHost: string;
+  updateProxyPort: number;
+  updateProxyUser: string;
+  updateProxyPass: string;
 }
 
 export interface Settings {

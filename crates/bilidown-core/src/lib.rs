@@ -35,7 +35,7 @@ pub use api::types::{
 pub use api::video::{UgcEpisode, UgcSeason, UgcSection};
 pub use storage::{
     AppPaths, Credentials, Db, HistoryQuery, HistoryRecord, MigrationReport, MotionPreference,
-    Settings, Storage, TaskRecord, ThemePreference,
+    Settings, Storage, TaskRecord, ThemePreference, UpdateProxyMode,
 };
 pub use task::{
     ActualParams, ArtifactKind, DownloadArtifact, DownloadPipeline, MAX_CONCURRENT, QueueSnapshot,

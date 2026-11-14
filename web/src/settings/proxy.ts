@@ -4,12 +4,22 @@
  * 代理输入在本地以字符串草稿维护：地址/端口未填完时不提交，原有效网络配置继续工作；
  * 只有完整有效的草稿才生成设置补丁；连接测试只读取草稿，不产生设置提交。
  */
-import type { ProxyDTO } from '../lib/contract';
+import type { ProxyDTO, UpdateProxyDTO } from '../lib/contract';
 import type { NetworkSettings, SettingsPatch } from '../lib/types';
 import { errorMessageOf } from '../lib/errors';
 
 export interface ProxyDraft {
   mode: 'direct' | 'manual';
+  host: string;
+  portText: string;
+  user: string;
+  pass: string;
+}
+
+export type UpdateProxyMode = 'system' | 'direct' | 'manual';
+
+export interface UpdateProxyDraft {
+  mode: UpdateProxyMode;
   host: string;
   portText: string;
   user: string;
@@ -31,6 +41,16 @@ export function proxyDraftFromSettings(network: NetworkSettings): ProxyDraft {
   };
 }
 
+export function updateProxyDraftFromSettings(network: NetworkSettings): UpdateProxyDraft {
+  return {
+    mode: network.updateProxyMode,
+    host: network.updateProxyHost,
+    portText: String(network.updateProxyPort),
+    user: network.updateProxyUser,
+    pass: network.updateProxyPass,
+  };
+}
+
 /** 端口草稿 → 合法端口（1–65535 的整数）；非法返回 null。 */
 export function parseProxyPort(text: string): number | null {
   const trimmed = text.trim();
@@ -47,8 +67,21 @@ export function proxyDraftIssues(draft: ProxyDraft): ProxyDraftIssues {
   return issues;
 }
 
+export function updateProxyDraftIssues(draft: UpdateProxyDraft): ProxyDraftIssues {
+  if (draft.mode !== 'manual') return {};
+  const issues: ProxyDraftIssues = {};
+  if (!draft.host.trim()) issues.host = '请输入更新代理地址';
+  if (parseProxyPort(draft.portText) === null) issues.port = '端口需在 1–65535 之间';
+  return issues;
+}
+
 export function isProxyDraftComplete(draft: ProxyDraft): boolean {
   const issues = proxyDraftIssues(draft);
+  return !issues.host && !issues.port;
+}
+
+export function isUpdateProxyDraftComplete(draft: UpdateProxyDraft): boolean {
+  const issues = updateProxyDraftIssues(draft);
   return !issues.host && !issues.port;
 }
 
@@ -61,6 +94,17 @@ export function proxyModeChangePatch(draft: ProxyDraft, mode: 'direct' | 'manual
   if (mode === 'direct') return { network: { proxyMode: 'direct' } };
   const manual: ProxyDraft = { ...draft, mode: 'manual' };
   return isProxyDraftComplete(manual) ? proxyDraftPatch(manual) : null;
+}
+
+export function updateProxyModeChangePatch(
+  draft: UpdateProxyDraft,
+  mode: UpdateProxyMode,
+): SettingsPatch | null {
+  if (mode === 'system' || mode === 'direct') {
+    return { network: { updateProxyMode: mode } };
+  }
+  const manual: UpdateProxyDraft = { ...draft, mode: 'manual' };
+  return isUpdateProxyDraftComplete(manual) ? updateProxyDraftPatch(manual) : null;
 }
 
 /** 完整有效的代理草稿 → 设置补丁（直连时只提交 mode，沿用契约语义）。 */
@@ -80,11 +124,34 @@ export function proxyDraftPatch(draft: ProxyDraft): SettingsPatch | null {
   };
 }
 
+export function updateProxyDraftPatch(draft: UpdateProxyDraft): SettingsPatch | null {
+  if (draft.mode === 'manual' && !isUpdateProxyDraftComplete(draft)) return null;
+  return {
+    network: {
+      updateProxyMode: draft.mode,
+      updateProxyHost: draft.host.trim(),
+      updateProxyPort: parseProxyPort(draft.portText) ?? 7890,
+      updateProxyUser: draft.user,
+      updateProxyPass: draft.pass,
+    },
+  };
+}
+
 /** 连接测试使用当前完整草稿（含可选认证），不读取也不写入已保存设置。 */
 export function proxyDraftDTO(draft: ProxyDraft): ProxyDTO {
   if (draft.mode === 'direct') return { mode: 'direct' };
   return {
     mode: 'manual',
+    host: draft.host.trim(),
+    port: parseProxyPort(draft.portText) ?? undefined,
+    user: draft.user,
+    pass: draft.pass,
+  };
+}
+
+export function updateProxyDraftDTO(draft: UpdateProxyDraft): UpdateProxyDTO {
+  return {
+    mode: draft.mode,
     host: draft.host.trim(),
     port: parseProxyPort(draft.portText) ?? undefined,
     user: draft.user,
@@ -100,6 +167,11 @@ export function proxyDraftToNetwork(draft: ProxyDraft): NetworkSettings {
     proxyPort: parseProxyPort(draft.portText) ?? 7890,
     proxyUser: draft.user,
     proxyPass: draft.pass,
+    updateProxyMode: 'system',
+    updateProxyHost: '',
+    updateProxyPort: 7890,
+    updateProxyUser: '',
+    updateProxyPass: '',
   };
 }
 
@@ -119,5 +191,33 @@ export async function testProxyDraft(
     return await test(proxyDraftToNetwork(draft));
   } catch (error) {
     return { ok: false, message: `无法连接代理：${errorMessageOf(error)}` };
+  }
+}
+
+export async function testUpdateProxyDraft(
+  draft: UpdateProxyDraft,
+  test: (network: NetworkSettings) => Promise<{ ok: boolean; message: string }>,
+): Promise<{ ok: boolean; message: string }> {
+  const issues = updateProxyDraftIssues(draft);
+  if (draft.mode === 'manual' && (issues.host || issues.port)) {
+    return { ok: false, message: issues.host ?? issues.port ?? '无法连接更新代理' };
+  }
+  try {
+    return await test({
+      ...{
+        proxyMode: 'direct',
+        proxyHost: '',
+        proxyPort: 7890,
+        proxyUser: '',
+        proxyPass: '',
+      },
+      updateProxyMode: draft.mode,
+      updateProxyHost: draft.host.trim(),
+      updateProxyPort: parseProxyPort(draft.portText) ?? 7890,
+      updateProxyUser: draft.user,
+      updateProxyPass: draft.pass,
+    });
+  } catch (error) {
+    return { ok: false, message: `无法连接更新代理：${errorMessageOf(error)}` };
   }
 }

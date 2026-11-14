@@ -20,6 +20,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::AsyncWriteExt;
 
+use crate::state::ShellState;
+use crate::update_proxy::UpdateTransport;
+
 /// GitHub 仓库（当前为私密仓库；公开后 Releases API 可直接匿名访问）。
 pub const REPO: &str = "Goldloli/bilidown";
 pub const RELEASES_API: &str =
@@ -33,7 +36,6 @@ const CHECKSUMS_ASSET: &str = "SHA256SUMS.txt";
 const MAX_CHECKSUM_BYTES: usize = 1024 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_NOTES_CHARS: usize = 600;
@@ -113,6 +115,15 @@ pub struct AppUpdateState {
     snapshot: Mutex<AppUpdateSnapshot>,
     /// 最近一次检查解析出的候选版本（start_app_update_download 使用，避免重复请求 API）。
     last_check: Mutex<Option<ResolvedRelease>>,
+}
+
+async fn update_transport(app: &AppHandle) -> Result<UpdateTransport, String> {
+    let core = app
+        .state::<ShellState>()
+        .core()
+        .await
+        .map_err(|error| format!("读取更新代理设置失败: {error}"))?;
+    UpdateTransport::from_settings(&core.settings(), USER_AGENT).await
 }
 
 impl Default for AppUpdateState {
@@ -359,7 +370,7 @@ fn is_newer(current: &Version, remote: &Version) -> bool {
 // URL / 安全校验
 // ---------------------------------------------------------------------------
 
-fn is_trusted_host(host: &str) -> bool {
+pub(crate) fn is_trusted_host(host: &str) -> bool {
     host == "api.github.com"
         || host == "github.com"
         || host == "objects.githubusercontent.com"
@@ -393,34 +404,22 @@ fn validate_response_url(url: &reqwest::Url) -> Result<(), String> {
     Err("下载请求被重定向到非可信域名，已拒绝。".into())
 }
 
-fn github_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.stop();
-            }
-            match attempt.url().host_str() {
-                Some(host) if is_trusted_host(host) => attempt.follow(),
-                _ => attempt.stop(),
-            }
-        }))
-        .build()
-        .map_err(|error| format!("创建 GitHub 客户端失败: {error}"))
-}
-
 // ---------------------------------------------------------------------------
 // GitHub API
 // ---------------------------------------------------------------------------
 
-async fn fetch_releases() -> Result<Vec<GitHubRelease>, String> {
-    let response = github_client()?
-        .get(RELEASES_API)
-        .timeout(API_TIMEOUT)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
+async fn fetch_releases(transport: &UpdateTransport) -> Result<Vec<GitHubRelease>, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("x-github-api-version"),
+        reqwest::header::HeaderValue::from_static("2022-11-28"),
+    );
+    let response = transport
+        .get(RELEASES_API, headers, Some(API_TIMEOUT))
         .await
         .map_err(|error| format!("检查更新失败（网络）: {error}"))?;
     let status = response.status();
@@ -451,12 +450,17 @@ async fn fetch_releases() -> Result<Vec<GitHubRelease>, String> {
         .map_err(|error| format!("解析 GitHub Releases 失败: {error}"))
 }
 
-async fn fetch_expected_checksum(asset: &GitHubAsset) -> Result<String, String> {
+async fn fetch_expected_checksum(
+    transport: &UpdateTransport,
+    asset: &GitHubAsset,
+) -> Result<String, String> {
     validate_asset_url(&asset.browser_download_url)?;
-    let response = github_client()?
-        .get(&asset.browser_download_url)
-        .timeout(API_TIMEOUT)
-        .send()
+    let response = transport
+        .get(
+            &asset.browser_download_url,
+            reqwest::header::HeaderMap::new(),
+            Some(API_TIMEOUT),
+        )
         .await
         .map_err(|error| format!("下载 {CHECKSUMS_ASSET} 失败: {error}"))?
         .error_for_status()
@@ -636,8 +640,12 @@ async fn hash_file(path: &Path) -> Result<String, String> {
 }
 
 /// 执行下载：进入前 snapshot 已置为 downloading；结束后自行写 completed/error/cancelled。
-async fn run_download(app: AppHandle, resolved: ResolvedRelease) -> Result<(), UpdateError> {
-    let result = download_inner(&app, &resolved).await;
+async fn run_download(
+    app: AppHandle,
+    resolved: ResolvedRelease,
+    transport: UpdateTransport,
+) -> Result<(), UpdateError> {
+    let result = download_inner(&app, &resolved, &transport).await;
     match result {
         Ok(()) => Ok(()),
         Err(UpdateError::Cancelled) => {
@@ -663,7 +671,11 @@ async fn run_download(app: AppHandle, resolved: ResolvedRelease) -> Result<(), U
     }
 }
 
-async fn download_inner(app: &AppHandle, resolved: &ResolvedRelease) -> Result<(), UpdateError> {
+async fn download_inner(
+    app: &AppHandle,
+    resolved: &ResolvedRelease,
+    transport: &UpdateTransport,
+) -> Result<(), UpdateError> {
     validate_asset_url(&resolved.installer.browser_download_url)?;
     validate_asset_url(&resolved.checksums.browser_download_url)?;
     if resolved.installer.size == 0 || resolved.installer.size > MAX_INSTALLER_BYTES {
@@ -671,7 +683,7 @@ async fn download_inner(app: &AppHandle, resolved: &ResolvedRelease) -> Result<(
     }
     ensure_not_cancelled(app)?;
 
-    let checksum_text = fetch_expected_checksum(&resolved.checksums).await?;
+    let checksum_text = fetch_expected_checksum(transport, &resolved.checksums).await?;
     let expected_checksum =
         parse_checksum(&checksum_text, &resolved.installer.name).ok_or_else(|| {
             UpdateError::Failed(format!(
@@ -732,10 +744,12 @@ async fn download_inner(app: &AppHandle, resolved: &ResolvedRelease) -> Result<(
         snapshot.error = None;
     })?;
 
-    let client = github_client()?;
-    let mut response = match client
-        .get(&resolved.installer.browser_download_url)
-        .send()
+    let mut response = match transport
+        .get(
+            &resolved.installer.browser_download_url,
+            reqwest::header::HeaderMap::new(),
+            None,
+        )
         .await
     {
         Ok(response) => response,
@@ -899,7 +913,8 @@ pub async fn check_in_background(app: AppHandle) -> Result<AppUpdateCheck, Strin
     })?;
 
     let result = async {
-        let releases = fetch_releases().await?;
+        let transport = update_transport(&app).await?;
+        let releases = fetch_releases(&transport).await?;
         let selected = select_release(&releases)?
             .ok_or_else(|| format!("仓库 {REPO} 还没有正式 Release。"))?;
         let current = app.package_info().version.clone();
@@ -944,7 +959,7 @@ pub async fn check_in_background(app: AppHandle) -> Result<AppUpdateCheck, Strin
     }
 }
 
-pub fn start_app_update_download(
+pub async fn start_app_update_download(
     app: AppHandle,
     state: tauri::State<'_, AppUpdateState>,
     version: String,
@@ -973,6 +988,7 @@ pub fn start_app_update_download(
     if !is_newer(&current, &cached.version) {
         return Err("该版本不高于当前版本，无需下载。".into());
     }
+    let transport = update_transport(&app).await?;
     state.cancel.store(false, Ordering::SeqCst);
     let initial = mutate_snapshot(&app, |snapshot| {
         *snapshot = AppUpdateSnapshot {
@@ -987,7 +1003,7 @@ pub fn start_app_update_download(
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result = run_download(app_handle, cached).await;
+        let result = run_download(app_handle, cached, transport).await;
         match result {
             Ok(()) | Err(UpdateError::Cancelled) => {}
             Err(UpdateError::Failed(message)) => {
@@ -996,6 +1012,45 @@ pub fn start_app_update_download(
         }
     });
     Ok(initial)
+}
+
+pub async fn test_update_proxy(
+    proxy: crate::dto::UpdateProxyDTO,
+) -> Result<crate::dto::TestProxyResultDTO, String> {
+    let mode = crate::dto::update_proxy_mode_from_str(&proxy.mode);
+    let settings = bilidown_core::Settings {
+        update_proxy_mode: mode,
+        update_proxy: crate::dto::manual_proxy_url(
+            proxy.host.as_deref(),
+            proxy.port,
+            proxy.user.as_deref(),
+            proxy.pass.as_deref(),
+        ),
+        ..Default::default()
+    };
+    let transport = UpdateTransport::from_settings(&settings, USER_AGENT).await?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
+    );
+    let started = Instant::now();
+    let response = transport
+        .get(
+            &format!("https://api.github.com/repos/{REPO}"),
+            headers,
+            Some(API_TIMEOUT),
+        )
+        .await?;
+    Ok(crate::dto::TestProxyResultDTO {
+        ok: response.status().is_success(),
+        message: format!(
+            "{} · HTTP {}（{} ms）",
+            transport.mode_label(),
+            response.status(),
+            started.elapsed().as_millis()
+        ),
+    })
 }
 
 pub fn cancel_app_update_download(

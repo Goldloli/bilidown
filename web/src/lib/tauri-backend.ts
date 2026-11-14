@@ -87,6 +87,8 @@ export function createTauriBackend(): Backend {
     detectFfmpeg: () =>
       invoke<{ detected: boolean; version: string | null; path: string | null }>('detect_ffmpeg'),
     testProxy: (proxy) => invoke<{ ok: boolean; message: string }>('test_proxy', { proxy }),
+    testUpdateProxy: (proxy) =>
+      invoke<{ ok: boolean; message: string }>('test_update_proxy', { proxy }),
     fetchCover: (url) => invoke<string>('fetch_cover', { url }),
 
     on<T>(event: ContractEventName, handler: (payload: T) => void) {

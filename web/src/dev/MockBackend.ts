@@ -912,6 +912,23 @@ export class MockBackend implements Backend {
       : { ok: false, message: '请输入代理地址' };
   };
 
+  testUpdateProxy = async (
+    proxy: SettingsDTO['updateProxy'],
+  ): Promise<{ ok: boolean; message: string }> => {
+    if (proxy.mode === 'manual' && !(proxy.host ?? '').trim()) {
+      return { ok: false, message: '请输入更新代理地址' };
+    }
+    return {
+      ok: true,
+      message:
+        proxy.mode === 'system'
+          ? '跟随系统代理 · 连接成功（mock）'
+          : proxy.mode === 'direct'
+            ? '更新直连 · 连接成功（mock）'
+            : '更新手动代理 · 连接成功（mock）',
+    };
+  };
+
   // ---- 事件 ----
   on<T>(event: ContractEventName, handler: (payload: T) => void): () => void {
     let set = this.listeners.get(event);

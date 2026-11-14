@@ -45,6 +45,19 @@ pub enum MotionPreference {
     Normal,
 }
 
+/// 软件更新链路使用的代理策略；媒体代理不读取此设置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateProxyMode {
+    /// 跟随操作系统当前 HTTP/HTTPS/SOCKS、PAC/WPAD 与绕过规则。
+    #[default]
+    System,
+    /// 更新请求显式直连。
+    Direct,
+    /// 仅使用更新专用手动代理。
+    Manual,
+}
+
 /// 应用设置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -65,6 +78,10 @@ pub struct Settings {
     pub ffmpeg_path: Option<String>,
     /// HTTP 代理（显式设置才启用）
     pub proxy: Option<String>,
+    /// 软件更新代理策略（默认跟随系统；媒体请求不读取）
+    pub update_proxy_mode: UpdateProxyMode,
+    /// 软件更新手动代理 URL；切换 system/direct 时保留
+    pub update_proxy: Option<String>,
     /// 主题偏好
     pub theme: ThemePreference,
     /// 强调色（`#RRGGBB`；None = 默认蓝色 #3B82F6）
@@ -104,6 +121,8 @@ impl Default for Settings {
             write_metadata: true,
             ffmpeg_path: None,
             proxy: None,
+            update_proxy_mode: UpdateProxyMode::System,
+            update_proxy: None,
             theme: ThemePreference::System,
             accent_color: None,
             motion: MotionPreference::System,
@@ -188,6 +207,23 @@ impl Settings {
                 message: format!("invalid proxy url: {proxy}"),
             });
         }
+        match self.update_proxy_mode {
+            UpdateProxyMode::Manual => {
+                let invalid = self
+                    .update_proxy
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none_or(|proxy| reqwest::Proxy::all(proxy).is_err());
+                if invalid {
+                    errors.push(ValidationError {
+                        field: "update_proxy",
+                        message: "manual update proxy requires a valid proxy URL".into(),
+                    });
+                }
+            }
+            UpdateProxyMode::System | UpdateProxyMode::Direct => {}
+        }
         if let Some(dir) = self
             .download_dir
             .as_deref()
@@ -253,6 +289,11 @@ mod tests {
             },
             Settings {
                 proxy: Some("not a proxy".into()),
+                ..Default::default()
+            },
+            Settings {
+                update_proxy_mode: UpdateProxyMode::Manual,
+                update_proxy: Some("not a proxy".into()),
                 ..Default::default()
             },
             Settings {
@@ -328,6 +369,8 @@ mod tests {
         assert!(s.window_glass);
         assert_eq!(s.accent_color, None);
         assert_eq!(s.motion, MotionPreference::System);
+        assert_eq!(s.update_proxy_mode, UpdateProxyMode::System);
+        assert_eq!(s.update_proxy, None);
         assert!(s.validate().is_ok());
     }
 
@@ -337,20 +380,28 @@ mod tests {
         let legacy = serde_json::json!({
             "max_concurrent": 2,
             "audio_to_mp3": true,
-            "theme": "dark"
+            "theme": "dark",
+            "proxy": "http://127.0.0.1:7897"
         });
         let s: Settings = serde_json::from_value(legacy).unwrap();
         assert_eq!(s.max_concurrent, 2);
         assert!(!s.download_subtitle, "旧配置缺字段应回退 false");
         assert!(!s.download_cover);
+        assert_eq!(s.update_proxy_mode, UpdateProxyMode::System);
+        assert_eq!(s.update_proxy, None);
+        assert_eq!(s.proxy.as_deref(), Some("http://127.0.0.1:7897"));
         // 显式开启往返
         let s = Settings {
             download_subtitle: true,
             download_cover: true,
+            update_proxy_mode: UpdateProxyMode::Manual,
+            update_proxy: Some("http://127.0.0.1:7897".into()),
             ..Default::default()
         };
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert!(back.download_subtitle && back.download_cover);
+        assert_eq!(back.update_proxy_mode, UpdateProxyMode::Manual);
+        assert_eq!(back.update_proxy.as_deref(), Some("http://127.0.0.1:7897"));
     }
 
     #[test]

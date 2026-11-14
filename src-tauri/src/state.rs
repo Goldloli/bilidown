@@ -1122,6 +1122,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_proxy_change_does_not_rebuild_media_client() {
+        let dir = unique_dir("update-proxy-isolation");
+        let core = test_core(&dir).await;
+        let before = core.client();
+        core.update_settings(|current| {
+            let mut next = current.clone();
+            next.update_proxy_mode = bilidown_core::UpdateProxyMode::Manual;
+            next.update_proxy = Some("http://127.0.0.1:7897".into());
+            Ok(next)
+        })
+        .await
+        .unwrap();
+        let after = core.client();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "更新代理变化不得重建 B 站/媒体 client"
+        );
+        assert!(
+            core.settings().update_proxy.is_some(),
+            "更新代理必须持久化"
+        );
+        assert_eq!(core.settings().proxy, None, "媒体代理保持原值");
+        core.manager.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn update_settings_serializes_concurrent_patches() {
         let dir = unique_dir("commit");
         let core = test_core(&dir).await;

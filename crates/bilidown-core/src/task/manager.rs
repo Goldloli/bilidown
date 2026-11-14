@@ -1040,9 +1040,13 @@ impl Inner {
         settings
             .validate()
             .map_err(|errors| BiliError::Other(format!("invalid settings: {errors:?}")))?;
+        let media_proxy_changed = self.settings.proxy != settings.proxy;
+        let ffmpeg_path_changed = self.settings.ffmpeg_path != settings.ffmpeg_path;
         self.settings = settings;
-        self.ffmpeg = Ffmpeg::detect(self.settings.ffmpeg_path.as_deref());
-        if let Ok(http) = download_client(self.settings.proxy.as_deref()) {
+        if ffmpeg_path_changed {
+            self.ffmpeg = Ffmpeg::detect(self.settings.ffmpeg_path.as_deref());
+        }
+        if media_proxy_changed && let Ok(http) = download_client(self.settings.proxy.as_deref()) {
             self.download_http = http;
         }
         self.enforce_permits();

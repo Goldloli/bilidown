@@ -92,6 +92,7 @@ Beads 是本项目的共享任务系统（`.beads/`，issue 前缀 `bilidown-`�
 
 - 更新链路（`app-update`）：按平台精确匹配资产（`bilidown_<version>_aarch64.dmg` / `_x64-setup.exe`）；下载后必须用 `SHA256SUMS.txt` 校验；不得静默替换正在运行的应用；Windows 安装器启动失败必须返回可读错误并保持应用运行，不得静默退出。
 - 更新进度单位：shell/状态事件使用 `0–100`，UI 统一转换为 `0–1` 后展示；查询与事件必须在同一归一化边界只换算一次，缺失进度保持未知，不得当作 `0%`。
+- 更新代理隔离：软件更新使用独立的系统/直连/手动代理，只作用于 GitHub API、校验文件与安装包；B 站 API、视频、字幕与封面继续使用媒体 `proxy`，不得因更新代理变化被改走系统代理或重建媒体网络配置。
 - 版本一致性：用 `node scripts/version.mjs --bump <版本>` 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`web/src/lib/constants.ts`，需通过 `node scripts/version.mjs` 检查。
 - Release：提前提交 `.github/release-notes/v<版本>.md`（`release.yml` 用 `--notes-file` 读取），推送 `v<版本>` tag 触发构建；资产必须同时包含 macOS DMG、Windows NSIS 与唯一 `SHA256SUMS.txt`。
 - README / 发布说明必须写明 macOS ad-hoc 签名与 Windows 未签名的放行方式（SmartScreen「更多信息 → 仍要运行」）。

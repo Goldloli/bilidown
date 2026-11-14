@@ -114,6 +114,7 @@ export interface Backend {
   openExternal(url: string): Promise<void>;
   detectFfmpeg(): Promise<{ detected: boolean; version: string | null; path: string | null }>;
   testProxy(proxy: SettingsDTO['proxy']): Promise<{ ok: boolean; message: string }>;
+  testUpdateProxy(proxy: SettingsDTO['updateProxy']): Promise<{ ok: boolean; message: string }>;
   fetchCover(url: string): Promise<string>;
 
   on<T>(event: ContractEventName, handler: (payload: T) => void): () => void;
@@ -380,6 +381,14 @@ class ApiClient {
       port: network.proxyPort,
       user: network.proxyUser,
       pass: network.proxyPass,
+    });
+  testUpdateProxy = (network: Settings['network']) =>
+    this.b().testUpdateProxy({
+      mode: network.updateProxyMode,
+      host: network.updateProxyHost,
+      port: network.updateProxyPort,
+      user: network.updateProxyUser,
+      pass: network.updateProxyPass,
     });
   quitApp = () => this.b().quitApp();
   forceQuitApp = () => this.b().forceQuitApp();

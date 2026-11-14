@@ -276,6 +276,14 @@ export interface ProxyDTO {
   pass?: string;
 }
 
+export interface UpdateProxyDTO {
+  mode: 'system' | 'direct' | 'manual';
+  host?: string;
+  port?: number;
+  user?: string;
+  pass?: string;
+}
+
 export interface SettingsDTO {
   downloadDir: string;
   maxConcurrent: number;
@@ -284,6 +292,7 @@ export interface SettingsDTO {
   audioFormat: string;
   ffmpegPath: string;
   proxy: ProxyDTO;
+  updateProxy: UpdateProxyDTO;
   theme: 'system' | 'light' | 'dark';
   notifications: boolean;
   watchClipboard: boolean;
@@ -323,6 +332,7 @@ export interface SettingsPatchDTO {
   audioFormat?: string;
   ffmpegPath?: string | null;
   proxy?: ProxyDTO;
+  updateProxy?: UpdateProxyDTO;
   theme?: 'system' | 'light' | 'dark';
   notifications?: boolean;
   watchClipboard?: boolean;

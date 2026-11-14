@@ -1,19 +1,32 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { defaultInternalSettings } from '../src/lib/adapt';
+import {
+  applySettingsPatchDTO,
+  defaultInternalSettings,
+  settingsPatchToDTO,
+} from '../src/lib/adapt';
 import {
   isProxyDraftComplete,
+  isUpdateProxyDraftComplete,
   parseProxyPort,
   proxyDraftFromSettings,
   proxyDraftIssues,
   proxyDraftPatch,
   proxyModeChangePatch,
   testProxyDraft,
+  testUpdateProxyDraft,
+  updateProxyDraftFromSettings,
+  updateProxyDraftIssues,
+  updateProxyDraftPatch,
+  updateProxyModeChangePatch,
   type ProxyDraft,
+  type UpdateProxyDraft,
 } from '../src/settings/proxy';
 import {
   ManualProxyFields,
   showsManualProxyFields,
+  showsUpdateManualProxyFields,
+  UpdateProxySettings,
 } from '../src/settings/pages/NetworkPage';
 
 const manualDraft = (overrides: Partial<ProxyDraft> = {}): ProxyDraft => ({
@@ -25,12 +38,36 @@ const manualDraft = (overrides: Partial<ProxyDraft> = {}): ProxyDraft => ({
   ...overrides,
 });
 
+const updateDraft = (
+  overrides: Partial<UpdateProxyDraft> = {},
+): UpdateProxyDraft => ({
+  mode: 'manual',
+  host: '127.0.0.1',
+  portText: '7897',
+  user: '',
+  pass: '',
+  ...overrides,
+});
 
+const neutralUpdateProxy = {
+  updateProxyMode: 'system' as const,
+  updateProxyHost: '',
+  updateProxyPort: 7890,
+  updateProxyUser: '',
+  updateProxyPass: '',
+};
 
 describe('手动代理草稿（design D4 / tasks 4.6）', () => {
   it('首次切换到手动代理时输入项立即可见，地址为空也不隐藏、不提交', () => {
     const saved = defaultInternalSettings();
-    saved.network = { proxyMode: 'direct', proxyHost: '', proxyPort: 7890, proxyUser: '', proxyPass: '' };
+    saved.network = {
+      proxyMode: 'direct',
+      proxyHost: '',
+      proxyPort: 7890,
+      proxyUser: '',
+      proxyPass: '',
+      ...neutralUpdateProxy,
+    };
     const manual: typeof saved.network = { ...saved.network, proxyMode: 'manual' };
 
     // 可见性只看草稿模式：地址尚未填写同样展示输入项。
@@ -147,6 +184,7 @@ describe('手动代理草稿（design D4 / tasks 4.6）', () => {
       proxyPort: 1080,
       proxyUser: 'u',
       proxyPass: 'p',
+      ...neutralUpdateProxy,
     });
     expect(draft).toEqual({
       mode: 'manual',
@@ -171,6 +209,7 @@ describe('手动代理草稿（design D4 / tasks 4.6）', () => {
       proxyPort: 1080,
       proxyUser: 'u',
       proxyPass: 'p',
+      ...neutralUpdateProxy,
     });
 
     test.mockClear();
@@ -187,5 +226,143 @@ describe('手动代理草稿（design D4 / tasks 4.6）', () => {
     const outgoing = await testProxyDraft(manualDraft(), test);
     expect(outgoing.ok).toBe(false);
     expect(outgoing.message).toContain('代理不可用');
+  });
+});
+
+describe('独立更新代理设置', () => {
+  it('网络页同时呈现媒体代理与更新代理，默认更新跟随系统', () => {
+    const network = defaultInternalSettings().network;
+    const html = renderToStaticMarkup(
+      <UpdateProxySettings
+        network={network}
+        portText="7890"
+        result={null}
+        testing={false}
+        onChangeMode={() => {}}
+        onHostChange={() => {}}
+        onPortChange={() => {}}
+        onUserChange={() => {}}
+        onPassChange={() => {}}
+        onHostCommit={() => {}}
+        onPortCommit={() => {}}
+        onCommit={() => {}}
+        onTest={() => {}}
+      />,
+    );
+    expect(html).toContain('软件更新下载代理');
+    expect(html).toContain('跟随系统代理');
+    expect(html).toContain('不改变视频下载网络');
+    expect(html).toContain('aria-label="更新代理模式"');
+    expect(showsManualProxyFields(network)).toBe(false);
+
+    const manual = renderToStaticMarkup(
+      <UpdateProxySettings
+        network={{ ...network, updateProxyMode: 'manual', updateProxyHost: '' }}
+        portText="7897"
+        result={null}
+        testing={false}
+        onChangeMode={() => {}}
+        onHostChange={() => {}}
+        onPortChange={() => {}}
+        onUserChange={() => {}}
+        onPassChange={() => {}}
+        onHostCommit={() => {}}
+        onPortCommit={() => {}}
+        onCommit={() => {}}
+        onTest={() => {}}
+      />,
+    );
+    expect(manual).toContain('aria-label="更新代理地址"');
+    expect(manual).toContain('aria-label="更新代理端口"');
+  });
+
+  it('默认跟随系统，媒体与更新模式互不影响', () => {
+    const defaults = defaultInternalSettings();
+    expect(defaults.network.proxyMode).toBe('direct');
+    expect(defaults.network.updateProxyMode).toBe('system');
+    expect(showsUpdateManualProxyFields(defaults.network)).toBe(false);
+    expect(
+      showsUpdateManualProxyFields({
+        ...defaults.network,
+        updateProxyMode: 'manual',
+      }),
+    ).toBe(true);
+  });
+
+  it('不完整更新手动草稿不覆盖已保存值，完整草稿只修改更新字段', () => {
+    expect(updateProxyDraftIssues(updateDraft({ host: '' })).host).toContain('更新代理');
+    expect(isUpdateProxyDraftComplete(updateDraft({ host: '' }))).toBe(false);
+    expect(updateProxyDraftPatch(updateDraft({ host: '' }))).toBeNull();
+    expect(updateProxyDraftPatch(updateDraft())).toEqual({
+      network: {
+        updateProxyMode: 'manual',
+        updateProxyHost: '127.0.0.1',
+        updateProxyPort: 7897,
+        updateProxyUser: '',
+        updateProxyPass: '',
+      },
+    });
+    expect(Object.keys(updateProxyDraftPatch(updateDraft())?.network ?? {})).not.toContain(
+      'proxyMode',
+    );
+  });
+
+  it('模式切换保留更新手动配置并立即生成 system/direct 补丁', () => {
+    for (const mode of ['system', 'direct'] as const) {
+      expect(updateProxyModeChangePatch(updateDraft(), mode)).toEqual({
+        network: { updateProxyMode: mode },
+      });
+    }
+    expect(
+      updateProxyDraftFromSettings({
+        ...defaultInternalSettings().network,
+        updateProxyMode: 'direct',
+        updateProxyHost: '127.0.0.1',
+        updateProxyPort: 7897,
+      }),
+    ).toMatchObject({ mode: 'direct', host: '127.0.0.1', portText: '7897' });
+
+    const base = defaultInternalSettings();
+    base.network.proxyMode = 'manual';
+    base.network.proxyHost = 'media.proxy';
+    base.network.updateProxyMode = 'manual';
+    base.network.updateProxyHost = '127.0.0.1';
+    base.network.updateProxyPort = 7897;
+    const dto = settingsPatchToDTO(
+      { network: { updateProxyMode: 'system' } },
+      base,
+    );
+    expect(dto.updateProxy).toMatchObject({
+      mode: 'system',
+      host: '127.0.0.1',
+      port: 7897,
+    });
+    expect(dto.proxy).toBeUndefined();
+
+    const applied = applySettingsPatchDTO(base, dto);
+    expect(applied.network.updateProxyMode).toBe('system');
+    expect(applied.network.updateProxyHost).toBe('127.0.0.1');
+    expect(applied.network.proxyHost).toBe('media.proxy');
+  });
+
+  it('测试更新连接只使用更新草稿，不触碰媒体代理并报告模式', async () => {
+    const test = vi.fn(async () => ({ ok: true, message: '更新连接成功' }));
+    const result = await testUpdateProxyDraft(
+      updateDraft({ user: 'u', pass: 'p' }),
+      test,
+    );
+    expect(result).toEqual({ ok: true, message: '更新连接成功' });
+    expect(test).toHaveBeenCalledWith({
+      proxyMode: 'direct',
+      proxyHost: '',
+      proxyPort: 7890,
+      proxyUser: '',
+      proxyPass: '',
+      updateProxyMode: 'manual',
+      updateProxyHost: '127.0.0.1',
+      updateProxyPort: 7897,
+      updateProxyUser: 'u',
+      updateProxyPass: 'p',
+    });
   });
 });

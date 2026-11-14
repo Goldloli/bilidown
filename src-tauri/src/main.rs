@@ -25,6 +25,7 @@ mod state;
 #[cfg(target_os = "windows")]
 mod tray;
 mod update;
+mod update_proxy;
 mod window;
 #[cfg(target_os = "windows")]
 mod windows_chrome;
@@ -129,6 +130,7 @@ fn main() {
         commands::open_external,
         commands::detect_ffmpeg,
         commands::test_proxy,
+        commands::test_update_proxy,
         commands::fetch_cover,
         // UGC 合集
         commands::resolve_ugc_season,
@@ -195,6 +197,7 @@ fn main() {
         commands::open_external,
         commands::detect_ffmpeg,
         commands::test_proxy,
+        commands::test_update_proxy,
         commands::fetch_cover,
         // UGC 合集
         commands::resolve_ugc_season,

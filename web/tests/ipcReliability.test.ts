@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createApiClient, type Backend } from '../src/lib/ipc';
 import type { ClearOutcomeDTO } from '../src/lib/contract';
+import { defaultInternalSettings } from '../src/lib/adapt';
 
 function backendWith(overrides: Partial<Backend>): Backend {
   return {
@@ -62,5 +63,28 @@ describe('持久化重试与强制退出命令', () => {
     const client = loggedClient(backendWith({ forceQuitApp }));
     await client.forceQuitApp();
     expect(forceQuitApp).toHaveBeenCalledTimes(1);
+  });
+
+  it('testUpdateProxy 只传递更新代理字段', async () => {
+    const testUpdateProxy = vi.fn(async () => ({ ok: true, message: '更新连接成功' }));
+    const client = loggedClient(
+      backendWith({ testUpdateProxy } as Partial<Backend>),
+    );
+    const network = defaultInternalSettings().network;
+    network.updateProxyMode = 'manual';
+    network.updateProxyHost = '127.0.0.1';
+    network.updateProxyPort = 7897;
+    network.updateProxyUser = 'u';
+    network.updateProxyPass = 'p';
+
+    await client.testUpdateProxy(network);
+
+    expect(testUpdateProxy).toHaveBeenCalledWith({
+      mode: 'manual',
+      host: '127.0.0.1',
+      port: 7897,
+      user: 'u',
+      pass: 'p',
+    });
   });
 });

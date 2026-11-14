@@ -23,7 +23,9 @@ pub use credentials::{Credentials, LOGIN_COOKIE_KEYS};
 pub use db::{Db, HistoryQuery, HistoryRecord, SCHEMA_VERSION, TaskRecord};
 pub use migrate::MigrationReport;
 pub use paths::AppPaths;
-pub use settings::{MotionPreference, Settings, ThemePreference, ValidationError};
+pub use settings::{
+    MotionPreference, Settings, ThemePreference, UpdateProxyMode, ValidationError,
+};
 
 /// 组合存储句柄：路径 + 数据库。设置/凭据按需读写文件（频率低）。
 pub struct Storage {

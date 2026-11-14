@@ -16,7 +16,9 @@ use bilidown_core::api::types::{
     AudioFormat, AudioQuality, Codec, Content, ContentKind, PlayUrl, Quality, TierUnavailable,
 };
 use bilidown_core::media::ffmpeg::Ffmpeg;
-use bilidown_core::storage::{HistoryRecord, MotionPreference, Settings, ThemePreference};
+use bilidown_core::storage::{
+    HistoryRecord, MotionPreference, Settings, ThemePreference, UpdateProxyMode,
+};
 use bilidown_core::{
     BiliError, DownloadArtifact, QueueSnapshot, TaskEvent, TaskExtras, TaskPhase, TaskSpec,
     TaskView, completed_entry_indices,
@@ -452,6 +454,17 @@ pub struct ProxyDTO {
     pub pass: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProxyDTO {
+    /// `system` / `direct` / `manual`
+    pub mode: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub pass: Option<String>,
+}
+
 /// core 启动阶段事件（design D5/5.2/5.4）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -475,6 +488,7 @@ pub struct SettingsDTO {
     pub audio_format: String,
     pub ffmpeg_path: String,
     pub proxy: ProxyDTO,
+    pub update_proxy: UpdateProxyDTO,
     pub theme: String,
     pub notifications: bool,
     pub watch_clipboard: bool,
@@ -1258,63 +1272,109 @@ pub fn login_poll_dto(outcome: LoginOutcome) -> LoginPollDTO {
 // 转换：设置（双向）
 // ---------------------------------------------------------------------------
 
-fn proxy_dto(proxy: &Option<String>) -> ProxyDTO {
-    match proxy {
-        None => ProxyDTO {
-            mode: "direct".into(),
-            host: None,
-            port: None,
-            user: None,
-            pass: None,
+fn proxy_parts(
+    raw: &Option<String>,
+) -> (Option<String>, Option<u16>, Option<String>, Option<String>) {
+    let Some(raw) = raw else {
+        return (None, None, None, None);
+    };
+    let trimmed = raw.trim();
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .or_else(|| trimmed.strip_prefix("socks5://"))
+        .or_else(|| trimmed.strip_prefix("socks5h://"))
+        .unwrap_or(trimmed);
+    let (auth, host_port) = match without_scheme.rsplit_once('@') {
+        Some((auth, host_port)) => (Some(auth), host_port),
+        None => (None, without_scheme),
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.parse::<u16>().ok()),
+        None => (host_port.to_string(), None),
+    };
+    let (user, pass) = match auth {
+        Some(auth) => match auth.split_once(':') {
+            Some((user, pass)) => (Some(user.to_string()), Some(pass.to_string())),
+            None => (Some(auth.to_string()), None),
         },
-        Some(raw) => {
-            let trimmed = raw.trim();
-            let without_scheme = trimmed
-                .strip_prefix("http://")
-                .or_else(|| trimmed.strip_prefix("https://"))
-                .or_else(|| trimmed.strip_prefix("socks5://"))
-                .unwrap_or(trimmed);
-            let (auth, host_port) = match without_scheme.rsplit_once('@') {
-                Some((auth, host_port)) => (Some(auth), host_port),
-                None => (None, without_scheme),
-            };
-            let (host, port) = match host_port.rsplit_once(':') {
-                Some((host, port)) => (host.to_string(), port.parse::<u16>().ok()),
-                None => (host_port.to_string(), None),
-            };
-            let (user, pass) = match auth {
-                Some(auth) => match auth.split_once(':') {
-                    Some((user, pass)) => (Some(user.to_string()), Some(pass.to_string())),
-                    None => (Some(auth.to_string()), None),
-                },
-                None => (None, None),
-            };
-            ProxyDTO {
-                mode: "manual".into(),
-                host: (!host.is_empty()).then_some(host),
-                port,
-                user,
-                pass,
-            }
-        }
+        None => (None, None),
+    };
+    (
+        (!host.is_empty()).then_some(host),
+        port,
+        user,
+        pass,
+    )
+}
+
+fn proxy_dto(proxy: &Option<String>) -> ProxyDTO {
+    let (host, port, user, pass) = proxy_parts(proxy);
+    ProxyDTO {
+        mode: if host.is_some() { "manual" } else { "direct" }.into(),
+        host,
+        port,
+        user,
+        pass,
     }
+}
+
+fn update_proxy_mode_str(mode: UpdateProxyMode) -> &'static str {
+    match mode {
+        UpdateProxyMode::System => "system",
+        UpdateProxyMode::Direct => "direct",
+        UpdateProxyMode::Manual => "manual",
+    }
+}
+
+pub(crate) fn update_proxy_mode_from_str(mode: &str) -> UpdateProxyMode {
+    match mode.to_ascii_lowercase().as_str() {
+        "direct" => UpdateProxyMode::Direct,
+        "manual" => UpdateProxyMode::Manual,
+        _ => UpdateProxyMode::System,
+    }
+}
+
+fn update_proxy_dto(mode: UpdateProxyMode, proxy: &Option<String>) -> UpdateProxyDTO {
+    let (host, port, user, pass) = proxy_parts(proxy);
+    UpdateProxyDTO {
+        mode: update_proxy_mode_str(mode).into(),
+        host,
+        port,
+        user,
+        pass,
+    }
+}
+
+pub(crate) fn manual_proxy_url(
+    host: Option<&str>,
+    port: Option<u16>,
+    user: Option<&str>,
+    pass: Option<&str>,
+) -> Option<String> {
+    let host = host.unwrap_or_default().trim();
+    if host.is_empty() {
+        return None;
+    }
+    let port = port.unwrap_or(7890);
+    let auth = match (user, pass) {
+        (Some(user), Some(pass)) if !user.is_empty() => format!("{user}:{pass}@"),
+        (Some(user), None) if !user.is_empty() => format!("{user}@"),
+        _ => String::new(),
+    };
+    Some(format!("http://{auth}{host}:{port}"))
 }
 
 fn proxy_url(proxy: &ProxyDTO) -> Option<String> {
     if proxy.mode != "manual" {
         return None;
     }
-    let host = proxy.host.as_deref().unwrap_or_default().trim();
-    if host.is_empty() {
-        return None;
-    }
-    let port = proxy.port.unwrap_or(7890);
-    let auth = match (proxy.user.as_deref(), proxy.pass.as_deref()) {
-        (Some(user), Some(pass)) if !user.is_empty() => format!("{user}:{pass}@"),
-        (Some(user), None) if !user.is_empty() => format!("{user}@"),
-        _ => String::new(),
-    };
-    Some(format!("http://{auth}{host}:{port}"))
+    manual_proxy_url(
+        proxy.host.as_deref(),
+        proxy.port,
+        proxy.user.as_deref(),
+        proxy.pass.as_deref(),
+    )
 }
 
 fn theme_str(theme: ThemePreference) -> &'static str {
@@ -1422,6 +1482,7 @@ pub fn settings_dto(settings: &Settings) -> SettingsDTO {
             .or(detected_path)
             .unwrap_or_default(),
         proxy: proxy_dto(&settings.proxy),
+        update_proxy: update_proxy_dto(settings.update_proxy_mode, &settings.update_proxy),
         theme: theme_str(settings.theme).into(),
         notifications: settings.notify_on_done,
         watch_clipboard: settings.watch_clipboard,
@@ -1458,6 +1519,20 @@ pub fn settings_from_dto(dto: &SettingsDTO, previous: &Settings) -> Settings {
         codec_from_label(&dto.codec)
     };
     let download_dir = dto.download_dir.trim();
+    let update_proxy_mode = update_proxy_mode_from_str(&dto.update_proxy.mode);
+    let update_proxy = manual_proxy_url(
+        dto.update_proxy.host.as_deref(),
+        dto.update_proxy.port,
+        dto.update_proxy.user.as_deref(),
+        dto.update_proxy.pass.as_deref(),
+    )
+    .or_else(|| {
+        if update_proxy_mode == UpdateProxyMode::Manual {
+            None
+        } else {
+            previous.update_proxy.clone()
+        }
+    });
     Settings {
         download_dir: (!download_dir.is_empty()).then(|| download_dir.to_string()),
         max_concurrent: dto.max_concurrent.clamp(1, 8),
@@ -1470,6 +1545,8 @@ pub fn settings_from_dto(dto: &SettingsDTO, previous: &Settings) -> Settings {
             (!path.is_empty()).then(|| path.to_string())
         },
         proxy: proxy_url(&dto.proxy),
+        update_proxy_mode,
+        update_proxy,
         theme: theme_from_str(&dto.theme),
         notify_on_done: dto.notifications,
         watch_clipboard: dto.watch_clipboard,
@@ -1514,6 +1591,8 @@ pub struct SettingsPatchDTO {
     pub ffmpeg_path: Option<Option<String>>,
     /// 省略 = 保持；`{"mode":"direct"}` 表示切回直连（design D4 代理草稿）。
     pub proxy: Option<ProxyDTO>,
+    /// 省略 = 保持；system/direct 切换时仍携带已保存的更新手动配置。
+    pub update_proxy: Option<UpdateProxyDTO>,
     pub theme: Option<String>,
     pub notifications: Option<bool>,
     pub watch_clipboard: Option<bool>,
@@ -1575,6 +1654,19 @@ pub fn apply_settings_patch(patch: &SettingsPatchDTO, previous: &Settings) -> Se
     }
     if let Some(value) = &patch.proxy {
         next.proxy = proxy_url(value);
+    }
+    if let Some(value) = &patch.update_proxy {
+        next.update_proxy_mode = update_proxy_mode_from_str(&value.mode);
+        if let Some(url) = manual_proxy_url(
+            value.host.as_deref(),
+            value.port,
+            value.user.as_deref(),
+            value.pass.as_deref(),
+        ) {
+            next.update_proxy = Some(url);
+        } else if next.update_proxy_mode == UpdateProxyMode::Manual {
+            next.update_proxy = None;
+        }
     }
     if let Some(value) = &patch.theme {
         next.theme = theme_from_str(value);
@@ -1789,6 +1881,69 @@ mod tests {
         let next = apply_settings_patch(&patch, &next);
         assert_eq!(next.max_concurrent, 5);
         assert!(next.download_subtitle);
+    }
+
+    #[test]
+    fn update_proxy_and_media_proxy_patches_are_isolated() {
+        let previous = Settings {
+            proxy: Some("http://media:8080".into()),
+            update_proxy_mode: UpdateProxyMode::Manual,
+            update_proxy: Some("http://update:7897".into()),
+            ..Default::default()
+        };
+
+        let update_patch: SettingsPatchDTO = serde_json::from_value(serde_json::json!({
+            "updateProxy": {
+                "mode": "system",
+                "host": "127.0.0.1",
+                "port": 7897,
+                "user": "u",
+                "pass": "p"
+            }
+        }))
+        .unwrap();
+        let next = apply_settings_patch(&update_patch, &previous);
+        assert_eq!(next.update_proxy_mode, UpdateProxyMode::System);
+        assert_eq!(
+            next.update_proxy.as_deref(),
+            Some("http://u:p@127.0.0.1:7897")
+        );
+        assert_eq!(next.proxy, previous.proxy);
+
+        let media_patch: SettingsPatchDTO = serde_json::from_value(serde_json::json!({
+            "proxy": {
+                "mode": "manual",
+                "host": "10.0.0.1",
+                "port": 1080
+            }
+        }))
+        .unwrap();
+        let next = apply_settings_patch(&media_patch, &next);
+        assert_eq!(next.proxy.as_deref(), Some("http://10.0.0.1:1080"));
+        assert_eq!(next.update_proxy_mode, UpdateProxyMode::System);
+        assert_eq!(
+            next.update_proxy.as_deref(),
+            Some("http://u:p@127.0.0.1:7897")
+        );
+    }
+
+    #[test]
+    fn settings_dto_marks_update_system_as_default_without_moving_media_proxy() {
+        let settings = Settings {
+            proxy: Some("http://127.0.0.1:7000".into()),
+            update_proxy_mode: UpdateProxyMode::System,
+            update_proxy: Some("http://127.0.0.1:7897".into()),
+            ..Default::default()
+        };
+        let dto = settings_dto(&settings);
+        assert_eq!(dto.proxy.mode, "manual");
+        assert_eq!(dto.proxy.port, Some(7000));
+        assert_eq!(dto.update_proxy.mode, "system");
+        assert_eq!(dto.update_proxy.port, Some(7897));
+        assert_eq!(
+            settings_from_dto(&dto, &settings).update_proxy.as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
     }
 
     #[test]

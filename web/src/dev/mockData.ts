@@ -128,6 +128,11 @@ export function defaultSettings(theme: 'light' | 'dark' | null): Settings {
       proxyPort: 7890,
       proxyUser: '',
       proxyPass: '',
+      updateProxyMode: 'system',
+      updateProxyHost: '',
+      updateProxyPort: 7890,
+      updateProxyUser: '',
+      updateProxyPass: '',
     },
   };
 }

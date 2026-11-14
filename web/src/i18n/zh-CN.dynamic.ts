@@ -216,9 +216,12 @@ export const dynamicStrings = {
   'settings.quality.ffmpeg.choose': '选择路径…',
 
   'settings.network.mode': '代理模式',
-  'settings.network.mode.desc': '默认直连，不读取系统代理设置',
+  'settings.network.mode.desc': 'B 站与视频默认直连，不读取系统代理设置',
+  'settings.network.media.title': 'B 站与视频下载代理',
+  'settings.network.media.desc': '仅用于 B 站接口、视频、字幕与封面，不会继承更新代理',
   'settings.network.direct': '直连',
   'settings.network.manual': '手动代理',
+  'settings.network.system': '跟随系统代理',
   'settings.network.host': '地址',
   'settings.network.port': '端口',
   'settings.network.user': '用户名（可选）',
@@ -229,6 +232,13 @@ export const dynamicStrings = {
   'settings.network.fail': '无法连接代理',
   'settings.network.invalidPort': '端口需在 1–65535 之间',
   'settings.network.invalidHost': '请输入代理地址',
+  'settings.network.media.scope':
+    'B 站与视频下载默认直连，避免媒体流量进入受限代理；如需代理请在上方显式配置。',
+  'settings.network.update.title': '软件更新下载代理',
+  'settings.network.update.desc':
+    '仅影响 GitHub 更新检查、SHA256SUMS 和安装包下载，不改变视频下载网络',
+  'settings.network.update.mode': '更新代理模式',
+  'settings.network.update.test': '测试更新连接',
 
   'settings.account.status': '登录状态',
   'settings.account.signedIn': '已登录',

@@ -68,9 +68,9 @@ CARGO_NET_OFFLINE=true pnpm tauri dev
 | `set_settings` | `settings: SettingsDTO` | `SettingsDTO`（兼容的完整替换入口；保存 + 热更新；非法值 reject） |
 | `patch_settings` | `patch: SettingsPatchDTO` | `SettingsDTO`（增量提交：省略=保持不变，`null`=清空可空字段；返回新 `revision`） |
 
-`SettingsDTO`：`downloadDir,maxConcurrent,quality,codec,audioFormat,ffmpegPath,proxy{mode,host,port,user,pass},theme,notifications,watchClipboard` +
+`SettingsDTO`：`downloadDir,maxConcurrent,quality,codec,audioFormat,ffmpegPath,proxy{mode,host,port,user,pass},updateProxy{mode(system|direct|manual),host,port,user,pass},theme,notifications,watchClipboard` +
 扩展 `parseConcurrency,historyLimit,historyClearPolicy,dockBadge,reduceMotion,showSpeedInStatus,writeMetadata,soundOnComplete,revealInFinderOnComplete,keepQueueOnExit,ffmpegDetected,ffmpegVersion,revision`。
-`SettingsPatchDTO` 字段：`downloadDir,maxConcurrent,quality,codec,audioFormat,ffmpegPath,proxy,theme,notifications,watchClipboard,historyLimit,writeMetadata,downloadSubtitle,downloadCover,checkUpdatesOnStartup,accentColor,motion,qualityFallback,glassBackground`（全部可选）。
+`SettingsPatchDTO` 字段：`downloadDir,maxConcurrent,quality,codec,audioFormat,ffmpegPath,proxy,updateProxy,theme,notifications,watchClipboard,historyLimit,writeMetadata,downloadSubtitle,downloadCover,checkUpdatesOnStartup,accentColor,motion,qualityFallback,glassBackground`（全部可选）。
 core 未实现的扩展字段由 Rust 回显默认值（parseConcurrency 固定 2、dockBadge 固定 true、soundOnComplete 固定 false 等）。
 
 ### 历史
@@ -101,6 +101,7 @@ core 未实现的扩展字段由 Rust 回显默认值（parseConcurrency 固定 
 | `open_external` | `url` | `void`（opener 默认浏览器） |
 | `detect_ffmpeg` | — | `{detected,version,path}`（`ffmpeg -version` 解析） |
 | `test_proxy` | `proxy: ProxyDTO` | `{ok,message}`（经代理 GET finger/spi，返回 HTTP 码与耗时） |
+| `test_update_proxy` | `proxy: UpdateProxyDTO` | `{ok,message}`（按 system/direct/manual 访问 GitHub API，不保存设置） |
 | `list_favorites` | — | `{folders:[{id,title,itemCount,coverUrl}]}`（需登录） |
 | `list_favorite_entries` | `folderId` | `ParseResultDTO`（收藏夹条目；标题仅解析前 30 条，其余占位） |
 | `enqueue_favorite` | `folderId`, `entryIndexes: number[]` | `{taskIds,rejected}`（120s 缓存复用列表） |
@@ -166,7 +167,7 @@ core 未实现的扩展字段由 Rust 回显默认值（parseConcurrency 固定 
 5. **历史 payload 为数组**（前端 `setEntries`）；`history_changed` core 事件触发重新查询 SQLite。
 6. **通知**：core `TaskEvent::Done/Failed` 且 `settings.notify_on_done` 时发 macOS 通知（标题/正文），点击激活窗口依赖系统默认 + `RunEvent::Reopen`（7.3 联调细化）。
 7. **Dock 徽标**：快照桥按 `active_count + queued_count` 调 NSDockTile（objc2），空时清除。
-8. **设置热更新**：代理变化时重建 `BiliClient` 并 `manager.set_client`；其余走 `manager.set_settings`。
+8. **设置热更新**：媒体 `proxy` 变化时重建 `BiliClient` 并 `manager.set_client`；`updateProxy` 只影响下一次 updater 操作，不重建媒体 client。
 9. **收藏夹**：`list_favorite_entries` 仅解析前 30 条标题（后续条目占位），并缓存 120s 供 `enqueue_favorite` 复用。
 10. **封面防盗链**：`fetch_cover(url) -> data URL`，内部用 `download_client(设置代理)` + `Referer: https://www.bilibili.com/` + UA 抓取；缓存 `<appData>/covers/<hash>.<ext>`，启动时清理 >30 天或超 500 张；失败返回空串由前端回退占位图。
     **前端待接**：`web/src/lib/contract.ts` 增加 `fetchCover` 扩展、`tauri-backend.ts` 调 `invoke<string>('fetch_cover',{url})`，`Thumbnail` 的 `src` 用返回值（命中缓存后与普通 URL 等价，仅首次联网）。
@@ -243,6 +244,14 @@ CARGO_NET_OFFLINE=true pnpm tauri build
 | `open_downloaded_update` | — | `void`（系统默认程序打开已校验 DMG） |
 | `open_update_file_location` | — | `void`（Finder 中显示 DMG） |
 | `open_about_link` | `link: string` | `void`（白名单 key：`repository` / `releases` / `issues` / `license` / `author` / `acknowledgements`，任何 URL 会被拒绝） |
+
+更新检查、`SHA256SUMS.txt` 和安装包统一经过 `update_proxy`：
+
+- `system`：读取 macOS/Windows 系统代理、绕过规则与 PAC/WPAD，每次更新操作开始前捕获快照。
+- `direct`：updater 显式 `no_proxy()`。
+- `manual`：只使用更新专用手动代理。
+
+该代理不得传给 core 的 `build_http_client` / `download_client`；B 站接口、视频、字幕、封面继续使用媒体 `proxy`。
 
 ## 8.2 DTO（camelCase）
 
