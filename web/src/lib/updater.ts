@@ -23,7 +23,7 @@ export type AppUpdateStatus =
   | 'error';
 
 /** shell 原始状态（含 verifying/completed/cancelled）；UI 侧归一化后使用 AppUpdateState */
-interface RawAppUpdateState {
+export interface RawAppUpdateState {
   status: 'idle' | 'checking' | 'available' | 'downloading' | 'verifying' | 'completed' | 'error' | 'cancelled';
   version?: string;
   filename?: string;
@@ -45,6 +45,7 @@ export interface AppUpdateState {
   path?: string;
   downloadedBytes: number;
   totalBytes?: number;
+  /** UI 进度使用 0–1，供 formatPercent 直接展示 */
   progress?: number;
   bytesPerSecond?: number;
   etaSeconds?: number;
@@ -91,7 +92,7 @@ export const ABOUT_LINK_LABEL: Record<AboutLink, string> = {
 const EVENTS = { progress: 'app-update://progress' } as const;
 
 /** shell 0–100 + verifying/completed/cancelled → UI 0–1 + downloading/downloaded */
-function normalizeState(raw: RawAppUpdateState): AppUpdateState {
+export function normalizeState(raw: RawAppUpdateState): AppUpdateState {
   const status: AppUpdateStatus =
     raw.status === 'completed'
       ? 'downloaded'
@@ -100,8 +101,7 @@ function normalizeState(raw: RawAppUpdateState): AppUpdateState {
         : raw.status === 'cancelled'
           ? 'idle'
           : raw.status;
-  const progress =
-    raw.progress == null ? undefined : raw.progress > 1 ? raw.progress / 100 : raw.progress;
+  const progress = raw.progress == null ? undefined : raw.progress / 100;
   return { ...raw, status, progress } as AppUpdateState;
 }
 

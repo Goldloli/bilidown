@@ -25,7 +25,7 @@ use super::pipeline::{DownloadPipeline, TaskReporter, TaskRunCtx, TaskRunner};
 use super::state::{
     ClearOutcome, DownloadArtifact, QueueSnapshot, TASK_METADATA_VERSION, TaskId, TaskMeta,
     TaskMetadata, TaskOutcome, TaskPhase, TaskResume, TaskView, WorkerEvent,
-    completed_entry_indices, now_ms,
+    completed_entry_indices, now_ms, prune_retry_view,
 };
 
 /// 并发上限（设置允许 1–8）。
@@ -605,6 +605,7 @@ impl Inner {
                 spec: view.spec.clone(),
                 resume: TaskResume {
                     completed_entries: completed_entry_indices(&view),
+                    selected_entries: view.selected_entries.clone(),
                     stage: view.progress.stage,
                 },
                 cancel: control.cancel.clone(),
@@ -696,9 +697,12 @@ impl Inner {
                 let _ = reply.send(result);
             }
             ManagerCommand::Retry { id, reply } => {
-                let _ = reply.send(self.retry_task(&id).await);
-                self.publish();
-                self.schedule();
+                let result = self.retry_task(&id).await;
+                if result.is_ok() {
+                    self.publish();
+                    self.schedule();
+                }
+                let _ = reply.send(result);
             }
             ManagerCommand::Remove { id, reply } => {
                 let _ = reply.send(self.remove_task(&id).await);
@@ -883,33 +887,43 @@ impl Inner {
     }
 
     async fn retry_task(&mut self, id: &str) -> BiliResult<()> {
-        let view = self.view_mut(id)?;
-        if !view.phase.can_retry() {
+        let previous = self.view(id)?.clone();
+        if !previous.phase.can_retry() {
             return Err(BiliError::Other(format!(
                 "cannot retry in phase {}",
-                view.phase.as_str()
+                previous.phase.as_str()
             )));
         }
-        view.phase = TaskPhase::Queued;
-        view.error = None;
-        view.progress = Progress::default();
-        view.speed_bps = 0.0;
-        view.output_path = None;
-        view.file_size = None;
-        view.artifacts.clear();
-        view.artifacts_legacy = false;
-        view.restored = false;
-        view.actual_quality = None;
-        view.actual_codec = None;
-        view.actual_audio = None;
-        view.touch();
+        let mut retry = previous.clone();
+        let completed = prune_retry_view(&mut retry);
+        let stage = retry.progress.stage;
+        retry.phase = TaskPhase::Queued;
+        retry.error = None;
+        retry.progress = Progress {
+            downloaded: 0,
+            total: 0,
+            stage,
+            entries_done: completed.len() as u32,
+        };
+        retry.speed_bps = 0.0;
+        retry.restored = false;
+        retry.persist_error = None;
+        retry.touch();
+
+        let record = task_record(&retry, self.record_index(id));
+        if let Err(error) = self.persist_record_checked(record).await {
+            self.mark_persist_error(id, &error);
+            self.emit(TaskEvent::Updated {
+                view: self.tasks[id].clone(),
+            });
+            return Err(error);
+        }
+
+        self.tasks.insert(id.to_string(), retry.clone());
         self.auto_retried.remove(id);
         self.controls.remove(id);
-        self.cleanup_temp(id).await;
-        let _ = self.persist_view(id).await;
-        self.emit(TaskEvent::Updated {
-            view: self.tasks[id].clone(),
-        });
+        self.clear_persist_error(id);
+        self.emit(TaskEvent::Updated { view: retry });
         Ok(())
     }
 
@@ -1167,8 +1181,8 @@ impl Inner {
                     }
                     view.refresh_artifact_projection();
                     view.progress.entries_done = completed_entry_indices(view).len() as u32;
-                    // 可选后处理附加信息（字幕/封面）随 Done 事件进入快照/DTO
-                    view.extras = outcome.extras;
+                    // 重试可能复用已完成条目的附加信息；新下载结果只做合并，不覆盖旧值。
+                    view.extras.merge(outcome.extras);
                     if view.progress.total > 0 {
                         view.progress.downloaded = view.progress.total;
                     }
@@ -1946,6 +1960,9 @@ mod tests {
         wait_for_cancel: bool,
         attempts: AtomicUsize,
         artifact_count: usize,
+        selected_entry_count: usize,
+        fail_after_artifacts: usize,
+        after_artifacts_delay_ms: u64,
         progress_start_delay_ms: u64,
         finish_delay_ms: u64,
     }
@@ -1969,8 +1986,14 @@ mod tests {
                 cover_url: None,
                 page_url: "https://example.com".into(),
                 content_kind: crate::api::types::ContentKind::Video,
-                entries: vec!["正片".into()],
-                selected_entries: vec![0],
+                entries: if self.behavior.selected_entry_count == 1 {
+                    vec!["正片".into()]
+                } else {
+                    (0..self.behavior.selected_entry_count)
+                        .map(|index| format!("P{}", index + 1))
+                        .collect()
+                },
+                selected_entries: (0..self.behavior.selected_entry_count).collect(),
                 duration_secs: Some(10),
             });
             ctx.reporter.phase(TaskPhase::Downloading);
@@ -2018,7 +2041,9 @@ mod tests {
                     "rename /tmp/a -> /tmp/b 失败: No such file or directory (os error 2)".into(),
                 ));
             }
-            if attempt < self.behavior.fail_times.load(Ordering::SeqCst) {
+            if attempt < self.behavior.fail_times.load(Ordering::SeqCst)
+                && self.behavior.fail_after_artifacts == 0
+            {
                 self.active.fetch_sub(1, Ordering::SeqCst);
                 return Err(BiliError::Network("mock failure".into()));
             }
@@ -2027,6 +2052,9 @@ mod tests {
                 let dir = ctx.settings.effective_download_dir();
                 tokio::fs::create_dir_all(&dir).await?;
                 for index in 0..self.behavior.artifact_count {
+                    if ctx.resume.completed_entries.contains(&index) {
+                        continue;
+                    }
                     let path = dir.join(format!("{}-{attempt}-{index}.mp4", ctx.id));
                     let bytes = format!("artifact-{attempt}-{index}").into_bytes();
                     tokio::fs::write(&path, &bytes).await?;
@@ -2038,7 +2066,35 @@ mod tests {
                     );
                     ctx.reporter.output(artifact.clone()).await?;
                     artifacts.push(artifact);
+                    if attempt < self.behavior.fail_times.load(Ordering::SeqCst)
+                        && artifacts.len() >= self.behavior.fail_after_artifacts
+                    {
+                        self.active.fetch_sub(1, Ordering::SeqCst);
+                        return Err(BiliError::Network("mock partial failure".into()));
+                    }
                 }
+            }
+            if self.behavior.after_artifacts_delay_ms > 0 {
+                tokio::select! {
+                    _ = ctx.cancel.cancelled() => {
+                        self.active.fetch_sub(1, Ordering::SeqCst);
+                        return Err(BiliError::Cancelled);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(
+                        self.behavior.after_artifacts_delay_ms,
+                    )) => {}
+                }
+            }
+            if artifacts.is_empty()
+                && !ctx.resume.selected_entries.is_empty()
+                && ctx
+                    .resume
+                    .selected_entries
+                    .iter()
+                    .all(|index| ctx.resume.completed_entries.contains(index))
+            {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                return Ok(TaskOutcome::default());
             }
             ctx.reporter.phase(TaskPhase::Merging);
             self.active.fetch_sub(1, Ordering::SeqCst);
@@ -2140,6 +2196,9 @@ mod tests {
             wait_for_cancel: false,
             attempts: AtomicUsize::new(0),
             artifact_count: 0,
+            selected_entry_count: 1,
+            fail_after_artifacts: 0,
+            after_artifacts_delay_ms: 0,
             progress_start_delay_ms: 0,
             finish_delay_ms: 0,
         }
@@ -2366,6 +2425,287 @@ mod tests {
         .await;
         assert_eq!(snap.tasks[0].id, id, "重试必须复用原行");
         h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_after_partial_output_reuses_valid_entries_and_breakpoint() {
+        let mut behavior = behavior_default();
+        behavior.fail_times = AtomicUsize::new(1);
+        behavior.artifact_count = 2;
+        behavior.selected_entry_count = 2;
+        behavior.fail_after_artifacts = 1;
+        behavior.after_artifacts_delay_ms = 500;
+        let h = harness(
+            Settings {
+                max_concurrent: 1,
+                ..Default::default()
+            },
+            behavior,
+        )
+        .await;
+        let ids = h
+            .manager
+            .enqueue(vec![spec("BV-partial"), spec("BV-blocker")])
+            .await
+            .unwrap();
+        let (id, blocker) = (ids[0].clone(), ids[1].clone());
+        let failed = wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .iter()
+                .any(|task| task.id == id && task.phase == TaskPhase::Failed)
+        })
+        .await;
+        let failed_task = failed.find(&id).unwrap();
+        let first_path = failed_task.artifacts[0].path.clone();
+        assert_eq!(failed_task.progress.entries_done, 1);
+        wait_for(&h.manager, |snapshot| {
+            snapshot.tasks.iter().any(|task| {
+                task.id == blocker
+                    && task.phase == TaskPhase::Downloading
+                    && !task.artifacts.is_empty()
+            })
+        })
+        .await;
+        let task_dir = h
+            .settings
+            .effective_download_dir()
+            .join(".bilidown-tmp")
+            .join(&id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("entry-1.video.m4s.part"), b"resume").unwrap();
+        let sibling_dir = task_dir.parent().unwrap().join("another-task");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        std::fs::write(sibling_dir.join("entry-0.video.m4s.part"), b"sibling").unwrap();
+
+        h.manager.retry(&id).await.unwrap();
+        let queued = h.manager.snapshot();
+        assert_eq!(queued.find(&id).unwrap().phase, TaskPhase::Queued);
+        assert_eq!(
+            std::fs::read(task_dir.join("entry-1.video.m4s.part")).unwrap(),
+            b"resume",
+            "手动重试必须保留目标任务断点"
+        );
+        assert_eq!(
+            std::fs::read(sibling_dir.join("entry-0.video.m4s.part")).unwrap(),
+            b"sibling",
+            "重试不得清理其他任务临时数据"
+        );
+
+        h.manager.cancel(&blocker).await.unwrap();
+        let done = wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .iter()
+                .any(|task| task.id == id && task.phase == TaskPhase::Done)
+        })
+        .await;
+        let done_task = done.find(&id).unwrap();
+        assert_eq!(done_task.progress.entries_done, 2);
+        assert_eq!(done_task.artifacts.len(), 2);
+        assert_eq!(done_task.artifacts[0].path, first_path);
+        assert!(std::path::Path::new(&first_path).exists());
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_with_all_entries_valid_does_not_replace_published_files() {
+        let mut behavior = behavior_default();
+        behavior.fail_times = AtomicUsize::new(1);
+        behavior.artifact_count = 2;
+        behavior.selected_entry_count = 2;
+        behavior.fail_after_artifacts = 2;
+        let h = harness(Settings::default(), behavior).await;
+        let id = h.manager.enqueue(vec![spec("BV-all-valid")]).await.unwrap()[0].clone();
+        let failed = wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .first()
+                .is_some_and(|task| task.id == id && task.phase == TaskPhase::Failed)
+        })
+        .await;
+        let paths: Vec<_> = failed.tasks[0]
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone())
+            .collect();
+        assert_eq!(paths.len(), 2);
+
+        h.manager.retry(&id).await.unwrap();
+        let done = wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .first()
+                .is_some_and(|task| task.id == id && task.phase == TaskPhase::Done)
+        })
+        .await;
+
+        assert_eq!(
+            done.tasks[0]
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.clone())
+                .collect::<Vec<_>>(),
+            paths,
+            "全部条目有效时不得生成替换文件"
+        );
+        for path in paths {
+            assert!(std::path::Path::new(&path).exists());
+        }
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_after_cancel_reuses_published_entry() {
+        let mut behavior = behavior_default();
+        behavior.artifact_count = 2;
+        behavior.selected_entry_count = 2;
+        behavior.after_artifacts_delay_ms = 500;
+        let h = harness(Settings::default(), behavior).await;
+        let id = h
+            .manager
+            .enqueue(vec![spec("BV-cancel-retry")])
+            .await
+            .unwrap()[0]
+            .clone();
+        let downloading = wait_for(&h.manager, |snapshot| {
+            snapshot.tasks.first().is_some_and(|task| {
+                task.id == id && task.phase == TaskPhase::Downloading && !task.artifacts.is_empty()
+            })
+        })
+        .await;
+        let first_path = downloading.tasks[0].artifacts[0].path.clone();
+        h.manager.cancel(&id).await.unwrap();
+        wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .first()
+                .is_some_and(|task| task.id == id && task.phase == TaskPhase::Cancelled)
+        })
+        .await;
+
+        h.manager.retry(&id).await.unwrap();
+        let done = wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .first()
+                .is_some_and(|task| task.id == id && task.phase == TaskPhase::Done)
+        })
+        .await;
+        assert_eq!(done.tasks[0].progress.entries_done, 2);
+        assert_eq!(done.tasks[0].artifacts[0].path, first_path);
+        assert!(std::path::Path::new(&first_path).exists());
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_persistence_failure_keeps_terminal_state_and_retryability() {
+        let mut behavior = behavior_default();
+        behavior.fail_times = AtomicUsize::new(1);
+        behavior.artifact_count = 2;
+        behavior.selected_entry_count = 2;
+        behavior.fail_after_artifacts = 1;
+        let h = harness(Settings::default(), behavior).await;
+        let id = h
+            .manager
+            .enqueue(vec![spec("BV-retry-store-fail")])
+            .await
+            .unwrap()[0]
+            .clone();
+        let failed = wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .first()
+                .is_some_and(|task| task.id == id && task.phase == TaskPhase::Failed)
+        })
+        .await;
+        let artifacts = failed.tasks[0].artifacts.clone();
+
+        h.storage.db().fail_next_task_upsert_once();
+        assert!(h.manager.retry(&id).await.is_err());
+        wait_until(
+            || {
+                h.manager
+                    .snapshot()
+                    .find(&id)
+                    .is_some_and(|task| task.persist_error.is_some())
+            },
+            "重试保存失败可见",
+        )
+        .await;
+        let after_failure = h.manager.snapshot();
+        let task = after_failure.find(&id).unwrap();
+        assert_eq!(task.phase, TaskPhase::Failed);
+        assert_eq!(task.artifacts, artifacts);
+
+        h.manager.retry(&id).await.unwrap();
+        wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .first()
+                .is_some_and(|task| task.id == id && task.phase == TaskPhase::Done)
+        })
+        .await;
+        h.manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_preserves_persisted_extras_and_metadata() {
+        let mut behavior = behavior_default();
+        behavior.fail_times = AtomicUsize::new(1);
+        behavior.artifact_count = 2;
+        behavior.selected_entry_count = 2;
+        behavior.fail_after_artifacts = 1;
+        let h = harness(Settings::default(), behavior).await;
+        let id = h
+            .manager
+            .enqueue(vec![spec("BV-retry-extras")])
+            .await
+            .unwrap()[0]
+            .clone();
+        wait_for(&h.manager, |snapshot| {
+            snapshot
+                .tasks
+                .first()
+                .is_some_and(|task| task.id == id && task.phase == TaskPhase::Failed)
+        })
+        .await;
+        h.manager.shutdown().await.unwrap();
+
+        let subtitle = h._dir.path().join("retained.srt");
+        std::fs::write(&subtitle, b"subtitle").unwrap();
+        let mut record = h
+            .storage
+            .db()
+            .load_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.id == id)
+            .unwrap();
+        let mut view = view_from_record(&record).unwrap();
+        view.extras.subtitles = vec![subtitle.to_string_lossy().into_owned()];
+        record = task_record(&view, 0);
+        h.storage.db().upsert_task(&record).unwrap();
+
+        let success = MockBehavior {
+            artifact_count: 2,
+            selected_entry_count: 2,
+            ..behavior_default()
+        };
+        let manager = restart_with(&h, success).await;
+        manager.retry(&id).await.unwrap();
+        let done = wait_for(&manager, |snapshot| {
+            snapshot
+                .tasks
+                .first()
+                .is_some_and(|task| task.id == id && task.phase == TaskPhase::Done)
+        })
+        .await;
+        let task = done.find(&id).unwrap();
+        assert_eq!(task.upper, "up");
+        assert_eq!(task.selected_entries, vec![0, 1]);
+        assert_eq!(task.extras.subtitles, view.extras.subtitles);
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]

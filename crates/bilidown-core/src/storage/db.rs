@@ -90,6 +90,9 @@ pub struct Db {
     /// 测试注入：下一次历史写入失败（验证可见错误与重试）。
     #[cfg(test)]
     history_fail_once: AtomicBool,
+    /// 测试注入：下一次单条任务写入失败（验证重试状态转换先落盘）。
+    #[cfg(test)]
+    task_upsert_fail_once: AtomicBool,
     /// 测试注入：下一次任务删除失败（验证部分失败汇总）。
     #[cfg(test)]
     delete_fail_once: AtomicBool,
@@ -116,6 +119,8 @@ impl Db {
             #[cfg(test)]
             history_fail_once: AtomicBool::new(false),
             #[cfg(test)]
+            task_upsert_fail_once: AtomicBool::new(false),
+            #[cfg(test)]
             delete_fail_once: AtomicBool::new(false),
         };
         db.configure()?;
@@ -133,6 +138,8 @@ impl Db {
             bulk_insert_fail_at: Mutex::new(None),
             #[cfg(test)]
             history_fail_once: AtomicBool::new(false),
+            #[cfg(test)]
+            task_upsert_fail_once: AtomicBool::new(false),
             #[cfg(test)]
             delete_fail_once: AtomicBool::new(false),
         };
@@ -185,6 +192,10 @@ impl Db {
     // ---- 队列任务 ----
 
     pub fn upsert_task(&self, rec: &TaskRecord) -> BiliResult<()> {
+        #[cfg(test)]
+        if self.task_upsert_fail_once.swap(false, Ordering::SeqCst) {
+            return Err(BiliError::Disk("测试注入：任务记录写入失败".into()));
+        }
         let conn = self.conn.lock().expect("db lock");
         write_task(&conn, rec).map_err(db_err)
     }
@@ -227,6 +238,12 @@ impl Db {
     #[cfg(test)]
     pub(crate) fn fail_next_history_once(&self) {
         self.history_fail_once.store(true, Ordering::SeqCst);
+    }
+
+    /// 测试注入：下一次单条任务写入失败。
+    #[cfg(test)]
+    pub(crate) fn fail_next_task_upsert_once(&self) {
+        self.task_upsert_fail_once.store(true, Ordering::SeqCst);
     }
 
     /// 测试注入：下一次任务删除失败。

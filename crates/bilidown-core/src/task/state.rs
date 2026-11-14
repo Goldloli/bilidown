@@ -574,6 +574,127 @@ mod tests {
     }
 
     #[test]
+    fn retry_prunes_invalid_duplicate_and_unowned_artifacts_without_deleting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid_media = dir.path().join("p2.mp4");
+        let missing_media = dir.path().join("p3-missing.mp4");
+        let duplicate_a = dir.path().join("p5-a.mp4");
+        let duplicate_b = dir.path().join("p5-b.mp4");
+        let legacy_media = dir.path().join("legacy.mp4");
+        let unselected_media = dir.path().join("p0.mp4");
+        let valid_video = dir.path().join("p8.video.m4s");
+        let valid_audio = dir.path().join("p8.audio.m4s");
+        let valid_subtitle = dir.path().join("p2.srt");
+        let valid_cover = dir.path().join("p2.jpg");
+        for (path, bytes) in [
+            (&valid_media, b"p2".as_slice()),
+            (&duplicate_a, b"p5a".as_slice()),
+            (&duplicate_b, b"p5b".as_slice()),
+            (&legacy_media, b"legacy".as_slice()),
+            (&unselected_media, b"p0".as_slice()),
+            (&valid_video, b"video".as_slice()),
+            (&valid_audio, b"audio".as_slice()),
+            (&valid_subtitle, b"srt".as_slice()),
+            (&valid_cover, b"jpg".as_slice()),
+        ] {
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        let mut view = TaskView::new(TaskSpec::new(crate::api::types::BiliId::Video {
+            bvid: "BV-retry-prune".into(),
+        }));
+        view.selected_entries = vec![2, 3, 5, 8];
+        view.artifacts = vec![
+            DownloadArtifact::media(valid_media.clone(), 2, Some(2), Some("P2".into())),
+            DownloadArtifact::media(missing_media.clone(), 99, Some(3), Some("P3".into())),
+            DownloadArtifact::media(duplicate_a.clone(), 3, Some(5), Some("P5".into())),
+            DownloadArtifact::media(duplicate_b.clone(), 3, Some(5), Some("P5".into())),
+            DownloadArtifact::stream(
+                valid_video,
+                5,
+                8,
+                Some("P8".into()),
+                ArtifactKind::VideoStream,
+            ),
+            DownloadArtifact::stream(
+                valid_audio,
+                5,
+                8,
+                Some("P8".into()),
+                ArtifactKind::AudioStream,
+            ),
+            DownloadArtifact::media(legacy_media.clone(), 6, None, None),
+            DownloadArtifact::media(unselected_media.clone(), 2, Some(0), Some("P0".into())),
+        ];
+        view.output_path = Some(missing_media.to_string_lossy().into_owned());
+        view.file_size = Some(999);
+        view.extras.subtitles = vec![
+            valid_subtitle.to_string_lossy().into_owned(),
+            dir.path()
+                .join("missing.srt")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        view.extras.cover = Some(valid_cover.to_string_lossy().into_owned());
+        let task_dir = dir.path().join(".bilidown-tmp");
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(task_dir.join("entry-3.video.m4s.part"), b"partial").unwrap();
+
+        let completed = prune_retry_view(&mut view);
+
+        assert_eq!(completed, HashSet::from([2, 8]));
+        assert!(view.artifacts.iter().any(|a| a.entry_index == Some(2)));
+        assert!(
+            view.artifacts
+                .iter()
+                .any(|a| a.entry_index == Some(8) && a.kind == ArtifactKind::VideoStream)
+        );
+        assert!(
+            view.artifacts
+                .iter()
+                .any(|a| a.entry_index == Some(8) && a.kind == ArtifactKind::AudioStream)
+        );
+        assert!(view.artifacts.iter().all(|a| a.entry_index.is_some()));
+        assert_eq!(
+            view.output_path.as_deref(),
+            Some(valid_media.to_string_lossy().as_ref())
+        );
+        assert_eq!(view.file_size, Some(12));
+        assert_eq!(view.extras.subtitles.len(), 1);
+        assert!(view.extras.cover.is_some());
+        assert!(task_dir.join("entry-3.video.m4s.part").exists());
+        for path in [
+            &duplicate_a,
+            &duplicate_b,
+            &legacy_media,
+            &unselected_media,
+        ] {
+            assert!(path.exists(), "剔除记录时不得删除磁盘文件");
+        }
+    }
+
+    #[test]
+    fn retry_without_reusable_artifacts_clears_projection() {
+        let mut view = TaskView::new(TaskSpec::new(crate::api::types::BiliId::Video {
+            bvid: "BV-retry-empty".into(),
+        }));
+        view.selected_entries = vec![0];
+        view.artifacts.push(DownloadArtifact::media(
+            PathBuf::from("/missing/retry.mp4"),
+            10,
+            Some(0),
+            None,
+        ));
+        view.output_path = Some("/missing/retry.mp4".into());
+        view.file_size = Some(10);
+
+        assert!(prune_retry_view(&mut view).is_empty());
+        assert!(view.artifacts.is_empty());
+        assert_eq!(view.output_path, None);
+        assert_eq!(view.file_size, None);
+    }
+
+    #[test]
     fn snapshot_counts() {
         let mut views = Vec::new();
         for (i, phase) in [
@@ -643,6 +764,8 @@ pub struct TaskOutcome {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskResume {
     pub completed_entries: HashSet<usize>,
+    /// 已解析任务实际选择的条目；空集表示尚未解析，不能仅凭产物提前判定全部完成。
+    pub selected_entries: Vec<usize>,
     pub stage: crate::api::types::DownloadStage,
 }
 
@@ -706,8 +829,8 @@ pub fn artifact_file_valid(artifact: &DownloadArtifact) -> bool {
         .unwrap_or(false)
 }
 
-pub fn completed_entry_indices(view: &TaskView) -> HashSet<usize> {
-    let selected: HashSet<usize> = if !view.selected_entries.is_empty() {
+fn selected_entry_indices(view: &TaskView) -> HashSet<usize> {
+    if !view.selected_entries.is_empty() {
         view.selected_entries.iter().copied().collect()
     } else {
         view.spec
@@ -716,7 +839,88 @@ pub fn completed_entry_indices(view: &TaskView) -> HashSet<usize> {
             .unwrap_or_default()
             .into_iter()
             .collect()
-    };
+    }
+}
+
+/// Rebuild a retryable view from artifacts that still prove a selected entry completed.
+///
+/// Invalid, duplicate, unselected, or legacy artifacts remain on disk but leave the task
+/// record. The returned set feeds the existing pipeline resume path.
+pub fn prune_retry_view(view: &mut TaskView) -> HashSet<usize> {
+    let selected = selected_entry_indices(view);
+    let mut candidates: HashMap<usize, Vec<DownloadArtifact>> = HashMap::new();
+    for artifact in view.artifacts.drain(..) {
+        let Some(entry_index) = artifact.entry_index else {
+            continue;
+        };
+        if (!selected.is_empty() && !selected.contains(&entry_index))
+            || !artifact_file_valid(&artifact)
+        {
+            continue;
+        }
+        candidates.entry(entry_index).or_default().push(artifact);
+    }
+
+    let mut reusable = Vec::new();
+    let mut completed = HashSet::new();
+    for (entry, artifacts) in candidates {
+        let media: Vec<_> = artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == ArtifactKind::Media)
+            .cloned()
+            .collect();
+        let video: Vec<_> = artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == ArtifactKind::VideoStream)
+            .cloned()
+            .collect();
+        let audio: Vec<_> = artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == ArtifactKind::AudioStream)
+            .cloned()
+            .collect();
+
+        if media.len() == 1 {
+            reusable.extend(media);
+            completed.insert(entry);
+        } else if media.is_empty() && video.len() == 1 && audio.len() == 1 {
+            reusable.extend(video);
+            reusable.extend(audio);
+            completed.insert(entry);
+        }
+    }
+    reusable.sort_by_key(|artifact| {
+        (
+            artifact.entry_index.unwrap_or(usize::MAX),
+            match artifact.kind {
+                ArtifactKind::Media => 0,
+                ArtifactKind::VideoStream => 1,
+                ArtifactKind::AudioStream => 2,
+            },
+        )
+    });
+
+    view.artifacts = reusable;
+    view.artifacts_legacy = false;
+    view.extras
+        .subtitles
+        .retain(|path| Path::new(path).is_file());
+    if view
+        .extras
+        .cover
+        .as_deref()
+        .is_some_and(|path| !Path::new(path).is_file())
+    {
+        view.extras.cover = None;
+    }
+    view.output_path = None;
+    view.file_size = None;
+    view.refresh_artifact_projection();
+    completed
+}
+
+pub fn completed_entry_indices(view: &TaskView) -> HashSet<usize> {
+    let selected = selected_entry_indices(view);
     let mut counts: HashMap<(usize, ArtifactKind), usize> = HashMap::new();
     for artifact in &view.artifacts {
         let Some(entry_index) = artifact.entry_index else {

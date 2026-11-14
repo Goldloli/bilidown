@@ -164,6 +164,15 @@ impl TaskRunner for DownloadPipeline {
 
 async fn run_pipeline(ctx: TaskRunCtx) -> BiliResult<TaskOutcome> {
     ctx.reporter.phase(TaskPhase::Resolving);
+    if !ctx.resume.selected_entries.is_empty()
+        && ctx
+            .resume
+            .selected_entries
+            .iter()
+            .all(|index| ctx.resume.completed_entries.contains(index))
+    {
+        return Ok(TaskOutcome::default());
+    }
     match ctx.spec.id.clone() {
         BiliId::Audio { song_id } => {
             if ctx.resume.completed_entries.contains(&0) {
