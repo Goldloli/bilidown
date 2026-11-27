@@ -15,7 +15,7 @@
  *   node scripts/fetch-ffmpeg.mjs --validate-lock # 只校验锁文件
  */
 import { createHash } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
 import { cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -277,12 +277,14 @@ async function ensureMacBuild(targetKey, entry, force) {
 
 function unzip(archive, destDir, kind) {
   if (kind === 'powershell') {
-    execFileSync('powershell', [
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      `Expand-Archive -LiteralPath '${archive.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`,
-    ]);
+    // Windows 10+ 自带 bsdtar 可解 zip；Expand-Archive 在部分 pwsh 版本上
+    // ExtractToDirectory 三参重载解析失败且以非零退出码丢失错误。
+    const systemTar = process.env.SystemRoot
+      ? path.join(process.env.SystemRoot, 'System32', 'tar.exe')
+      : null;
+    const tar = systemTar && existsSync(systemTar) ? systemTar : 'tar';
+    mkdirSync(destDir, { recursive: true });
+    execFileSync(tar, ['-xf', archive, '-C', destDir]);
   } else {
     execFileSync('unzip', ['-q', '-o', archive, '-d', destDir]);
   }
