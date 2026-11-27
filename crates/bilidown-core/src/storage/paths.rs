@@ -30,7 +30,7 @@ impl AppPaths {
         {
             let base = dirs::data_local_dir()
                 .ok_or_else(|| BiliError::Disk("cannot resolve local app data directory".into()))?;
-            return Ok(Self::new(base.join(APP_DIR_NAME_WINDOWS)));
+            Ok(Self::new(base.join(APP_DIR_NAME_WINDOWS)))
         }
         #[cfg(not(target_os = "windows"))]
         {

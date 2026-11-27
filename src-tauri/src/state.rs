@@ -787,10 +787,10 @@ fn update_taskbar_progress(app: &AppHandle, snapshot: &QueueSnapshot) {
             return;
         };
         let (done, total, running) = taskbar_signature(snapshot);
-        let state = if total > 0 {
+        let state = if let Some(percent) = done.saturating_mul(100).checked_div(total) {
             ProgressBarState {
                 status: Some(ProgressBarStatus::Normal),
-                progress: Some((done.saturating_mul(100) / total).min(100)),
+                progress: Some(percent.min(100)),
             }
         } else if running > 0 {
             ProgressBarState {

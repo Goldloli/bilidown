@@ -694,7 +694,7 @@ mod tests {
         ] {
             assert_eq!(alpha_at(layout, &pixels, x, y), 0);
         }
-        assert!(pixels.chunks_exact(4).all(|pixel| pixel[..3] == [0, 0, 0]));
+        assert!(pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[..3] == [0, 0, 0]));
     }
 
     #[test]
