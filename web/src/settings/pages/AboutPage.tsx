@@ -1,5 +1,5 @@
 import '../../i18n/zh-CN.dynamic';
-import { Fragment, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { t, type StringKey } from '../../i18n/zh-CN';
 import { APP_BUILD, APP_VERSION } from '../../lib/constants';
 import { api } from '../../lib/ipc';
@@ -51,6 +51,28 @@ export function RepositoryStarBadge({ stars }: { stars: number | null }) {
       <Icon name="star" size={11} className="text-warning" />
       {formatStarCount(stars)}
     </span>
+  );
+}
+
+export function RepositoryLink({ stars, onOpen }: { stars: number | null; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex w-full items-center justify-between py-2 text-left hover:text-accent"
+    >
+      <span className="min-w-0">
+        <span className="flex items-center gap-1.5 text-sm text-fg">
+          {t('settings.about.repository')}
+          <RepositoryStarBadge stars={stars} />
+        </span>
+        <span className="-mt-0.5 flex items-center gap-1 text-2xs text-fg2">
+          <Icon name="star" size={11} className="text-warning" />
+          {t('settings.about.starHint')}
+        </span>
+      </span>
+      <Icon name="external" size={12} className="text-fg3" />
+    </button>
   );
 }
 
@@ -341,31 +363,21 @@ export function AboutPage() {
       </SettingsGroup>
 
       <SettingsGroup title={t('settings.about.links')}>
-        {LINKS.map((link) => (
-          <Fragment key={link}>
+        {LINKS.map((link) =>
+          link === 'repository' ? (
+            <RepositoryLink key={link} stars={stars} onOpen={() => void openLink(link)} />
+          ) : (
             <button
+              key={link}
               type="button"
               onClick={() => void openLink(link)}
               className="flex w-full items-center justify-between py-2 text-left hover:text-accent"
             >
-              <span className="flex items-center gap-1.5 text-sm text-fg">
-                {t(LINK_KEYS[link])}
-                {link === 'repository' && <RepositoryStarBadge stars={stars} />}
-              </span>
+              <span className="flex items-center gap-1.5 text-sm text-fg">{t(LINK_KEYS[link])}</span>
               <Icon name="external" size={12} className="text-fg3" />
             </button>
-            {link === 'repository' && (
-              <button
-                type="button"
-                onClick={() => void openLink('repository')}
-                className="-mt-1 flex w-full items-center gap-1 pb-2 text-left text-2xs text-fg2 hover:text-accent"
-              >
-                <Icon name="star" size={11} className="text-warning" />
-                {t('settings.about.starHint')}
-              </button>
-            )}
-          </Fragment>
-        ))}
+          ),
+        )}
         <div className="flex items-center justify-between py-2">
           <span className="text-sm text-fg">{t('settings.about.copyright')}</span>
           <span className="text-2xs text-fg2">{t('settings.about.copyrightValue')}</span>

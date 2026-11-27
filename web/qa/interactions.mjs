@@ -132,6 +132,12 @@ async function checkPopoverInteractions(page, browser) {
   const search = page.getByRole('textbox', { name: '搜索' });
   await search.waitFor();
   if (panelRequests.length === 0) throw new Error('首次打开应按需加载动画面板');
+  await page.waitForFunction(() => {
+    const element = document.querySelector('[aria-label="搜索"]');
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.top >= 0 && rect.left >= 0 && rect.right <= window.innerWidth && rect.bottom <= window.innerHeight;
+  });
   const searchBox = await search.boundingBox();
   const viewport = page.viewportSize();
   if (!searchBox || !viewport || searchBox.x < 0 || searchBox.y < 0 || searchBox.x + searchBox.width > viewport.width || searchBox.y + searchBox.height > viewport.height) {
