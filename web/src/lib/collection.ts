@@ -30,32 +30,8 @@ export interface UgcSeason {
   episodes: UgcEpisode[];
 }
 
-const COVERS = Array.from({ length: 6 }, (_, i) => `/covers/cover-0${i + 1}.svg`);
-
 function isTauri(): boolean {
   return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__);
-}
-
-/** mock 合集（QA 截图与本地自测；真实模式由 shell 返回） */
-export function mockUgcSeason(): UgcSeason {
-  return {
-    seasonId: 1001,
-    title: '冰岛环岛 4K 旅拍全记录',
-    coverUrl: COVERS[0],
-    intro: '合集：极地影像的冰岛旅行系列',
-    upper: '极地影像',
-    currentIndex: 1,
-    episodes: Array.from({ length: 6 }, (_, index) => ({
-      bvid: `BV1mockSeason${index + 1}`,
-      cid: 9000 + index,
-      title: `第 ${String(index + 1).padStart(2, '0')} 集 · ${['出发', '冰川', '黑沙滩', '极光', '高地', '归途'][index]}`,
-      cover: COVERS[index % COVERS.length],
-      duration: 900 + index * 120,
-      sectionTitle: '正片',
-      index: index + 1,
-      isCurrent: index === 0,
-    })),
-  };
 }
 
 export async function resolveUgcSeason(bvid: string): Promise<UgcSeason | null> {
@@ -68,6 +44,7 @@ export async function resolveUgcSeason(bvid: string): Promise<UgcSeason | null> 
     }
   }
   if (devParams().scenario !== 'season-confirm' && !/SEASON/i.test(bvid)) return null;
+  const { mockUgcSeason } = await import('../dev/ugcSeason');
   return mockUgcSeason();
 }
 

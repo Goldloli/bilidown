@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::api::attachment::{AttachmentUrlPolicy, attachment_client};
 use crate::api::client::BiliClient;
 use crate::api::error::{BiliError, BiliResult};
 use crate::api::types::{AudioFormat, BiliId, Content, DownloadStage, Entry, Progress, TaskSpec};
@@ -849,22 +850,36 @@ async fn post_process(
                     "该内容没有封面 URL"
                 );
             }
-            Some(url) => match cover::download_cover(&ctx.http, url, video_path, &out_dir).await {
-                Ok(path) => {
-                    tracing::info!(
-                        target: "bilidown_core::post_process",
-                        task = %ctx.id,
-                        cover = %path.display(),
-                        "封面已保存"
-                    );
-                    extras.cover = Some(path.to_string_lossy().into_owned());
-                }
+            Some(url) => match attachment_client(
+                ctx.settings.proxy.as_deref(),
+                AttachmentUrlPolicy::default(),
+            ) {
+                Ok(http) => match cover::download_cover(&http, url, video_path, &out_dir).await {
+                    Ok(path) => {
+                        tracing::info!(
+                            target: "bilidown_core::post_process",
+                            task = %ctx.id,
+                            cover = %path.display(),
+                            "封面已保存"
+                        );
+                        extras.cover = Some(path.to_string_lossy().into_owned());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "bilidown_core::post_process",
+                            task = %ctx.id,
+                            error = %e.describe(),
+                            "封面下载失败（不影响主任务）"
+                        );
+                        extras.cover_error = Some(e.describe());
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         target: "bilidown_core::post_process",
                         task = %ctx.id,
                         error = %e.describe(),
-                        "封面下载失败（不影响主任务）"
+                        "封面客户端创建失败（不影响主任务）"
                     );
                     extras.cover_error = Some(e.describe());
                 }

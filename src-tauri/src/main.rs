@@ -143,6 +143,7 @@ fn main() {
         commands::open_downloaded_update,
         commands::open_update_file_location,
         commands::open_about_link,
+        commands::get_repository_stars,
         update::install_app_update,
     ]);
 
@@ -210,6 +211,7 @@ fn main() {
         commands::open_downloaded_update,
         commands::open_update_file_location,
         commands::open_about_link,
+        commands::get_repository_stars,
         update::install_app_update,
         commands::dev_report,
         commands::dev_menu_state,

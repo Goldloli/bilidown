@@ -328,6 +328,8 @@ export const dynamicStrings = {
   'settings.about.openFailed': '打开失败：{message}',
   'settings.about.links': '开源与致谢',
   'settings.about.repository': 'GitHub 仓库',
+  'settings.about.stars': 'GitHub Star {count}',
+  'settings.about.starHint': '觉得好用？给项目点个 Star 支持一下',
   'settings.about.releases': 'Releases',
   'settings.about.issues': 'Issues',
     'settings.about.author': '作者',

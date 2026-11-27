@@ -4,21 +4,22 @@
 //! 启动时清理 N 天未用/超量的旧缓存。
 
 use base64::Engine;
-use futures_util::StreamExt;
+use bilidown_core::api::attachment::{
+    AttachmentUrlPolicy, MAX_ATTACHMENT_BYTES, attachment_client, image_format as sniff,
+    read_attachment_body, send_attachment,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
-const REFERER: &str = "https://www.bilibili.com/";
-const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 /// 单张封面上限（B 站封面通常 < 1MB）。
-const MAX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_BYTES: usize = MAX_ATTACHMENT_BYTES;
 /// 支持的图片扩展名（磁盘缓存直接按 hash + 扩展名定位，不遍历目录，design D11/7.7）。
 const IMAGE_EXTS: [&str; 4] = ["jpg", "png", "webp", "gif"];
 
-type CoverClientCache = Mutex<Option<(Option<String>, reqwest::Client)>>;
+type CoverClientCache = Mutex<Option<(Option<String>, AttachmentUrlPolicy, reqwest::Client)>>;
 
 /// 按代理配置复用的图片 HTTP 客户端（不带登录 Cookie，design D11/7.7）。
 static COVER_CLIENT: OnceLock<CoverClientCache> = OnceLock::new();
@@ -29,23 +30,27 @@ fn cached_cover_proxy() -> Option<Option<String>> {
     COVER_CLIENT
         .get()
         .and_then(|cache| cache.lock().ok())
-        .and_then(|guard| guard.as_ref().map(|(key, _)| key.clone()))
+        .and_then(|guard| guard.as_ref().map(|(key, _, _)| key.clone()))
 }
 
-fn cover_client(proxy: Option<&str>) -> Option<reqwest::Client> {
+fn cover_client(proxy: Option<&str>, policy: AttachmentUrlPolicy) -> Option<reqwest::Client> {
     let key = proxy
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    if policy != AttachmentUrlPolicy::default() {
+        return attachment_client(key.as_deref(), policy).ok();
+    }
     let cache = COVER_CLIENT.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().ok()?;
-    if let Some((cached_key, client)) = guard.as_ref()
+    if let Some((cached_key, cached_policy, client)) = guard.as_ref()
         && cached_key == &key
+        && cached_policy == &policy
     {
         return Some(client.clone());
     }
-    let client = bilidown_core::api::client::download_client(key.as_deref()).ok()?;
-    *guard = Some((key, client.clone()));
+    let client = attachment_client(key.as_deref(), policy).ok()?;
+    *guard = Some((key, policy, client.clone()));
     Some(client)
 }
 
@@ -53,20 +58,6 @@ pub fn hash_url(url: &str) -> String {
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
-}
-
-fn sniff(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some(("image/jpeg", "jpg"))
-    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        Some(("image/png", "png"))
-    } else if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some(("image/webp", "webp"))
-    } else if bytes.starts_with(b"GIF8") {
-        Some(("image/gif", "gif"))
-    } else {
-        None
-    }
 }
 
 fn data_url(bytes: &[u8]) -> String {
@@ -111,29 +102,32 @@ fn log_identity(url: &str) -> (&str, String) {
 
 /// 抓取远程图片：缓存命中 → 读取；否则带 Referer/UA 经设置代理下载 → 校验 → 落盘 → data URL。
 pub async fn fetch(proxy: Option<&str>, cache_dir: &Path, url: &str) -> String {
+    fetch_with_policy(proxy, cache_dir, url, AttachmentUrlPolicy::default()).await
+}
+
+async fn fetch_with_policy(
+    proxy: Option<&str>,
+    cache_dir: &Path,
+    url: &str,
+    policy: AttachmentUrlPolicy,
+) -> String {
     let url = url.trim();
     if url.is_empty() {
         return String::new();
     }
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+    let Ok(normalized) = policy.normalize(url) else {
         return String::new();
-    }
+    };
     let _ = std::fs::create_dir_all(cache_dir);
     let hash = hash_url(url);
     if let Some(bytes) = cache_hit(cache_dir, &hash) {
         return data_url(&bytes);
     }
-    let Some(client) = cover_client(proxy) else {
+    let Some(client) = cover_client(proxy, policy) else {
         tracing::warn!(target: "shell::covers", "创建封面下载客户端失败");
         return String::new();
     };
-    let response = match client
-        .get(url)
-        .header("Referer", REFERER)
-        .header("User-Agent", UA)
-        .send()
-        .await
-    {
+    let response = match send_attachment(&client, policy, normalized.as_str()).await {
         Ok(response) => response,
         Err(err) => {
             let (host, hash) = log_identity(url);
@@ -146,19 +140,13 @@ pub async fn fetch(proxy: Option<&str>, cache_dir: &Path, url: &str) -> String {
         tracing::debug!(target: "shell::covers", url_host = host, url_hash = %hash, status = %response.status(), "远程图片 HTTP 失败");
         return String::new();
     }
-    // 流式读取并执行 8 MiB 上限，避免先把任意大小的响应完整装入内存（design D11/7.7）。
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else {
-            return String::new();
-        };
-        if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
-            tracing::debug!(target: "shell::covers", limit = MAX_BYTES, "远程图片超过大小上限，已中止");
+    let bytes = match read_attachment_body(response).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            tracing::debug!(target: "shell::covers", limit = MAX_BYTES, "远程图片读取失败或超过大小上限，已中止");
             return String::new();
         }
-        bytes.extend_from_slice(&chunk);
-    }
+    };
     if bytes.is_empty() || sniff(&bytes).is_none() {
         return String::new();
     }
@@ -225,14 +213,20 @@ mod tests {
     #[test]
     fn cover_client_cache_reuses_and_follows_proxy_changes() {
         // 同一代理复用同一客户端缓存；代理切换后缓存键更新（design D11/7.7）。
-        assert!(cover_client(Some("http://127.0.0.1:7897")).is_some());
+        assert!(
+            cover_client(
+                Some("http://127.0.0.1:7897"),
+                AttachmentUrlPolicy::default(),
+            )
+            .is_some()
+        );
         assert_eq!(
             cached_cover_proxy(),
             Some(Some("http://127.0.0.1:7897".to_string()))
         );
-        assert!(cover_client(None).is_some());
+        assert!(cover_client(None, AttachmentUrlPolicy::default()).is_some());
         assert_eq!(cached_cover_proxy(), Some(None));
-        assert!(cover_client(Some("  ")).is_some());
+        assert!(cover_client(Some("  "), AttachmentUrlPolicy::default()).is_some());
         assert_eq!(cached_cover_proxy(), Some(None), "空白代理视为直连");
     }
 
@@ -262,6 +256,58 @@ mod tests {
         assert_eq!(hash.len(), 16);
         assert!(!hash.contains("account"));
         assert!(!hash.contains("uid"));
+    }
+
+    #[tokio::test]
+    async fn network_images_are_bounded_sniffed_and_cached() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn serve_once(body: Vec<u8>, with_length: bool) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buffer = [0u8; 4096];
+                    let _ = socket.read(&mut buffer).await;
+                    let headers = if with_length {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                    } else {
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    };
+                    let _ = socket.write_all(headers.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                }
+            });
+            format!("http://{addr}/cover.jpg")
+        }
+
+        for (label, body, with_length, valid) in [
+            ("valid", vec![0xFF, 0xD8, 0xFF, 0x00], true, true),
+            ("html", b"<html>nope</html>".to_vec(), true, false),
+            ("oversize", vec![1; MAX_BYTES + 1], false, false),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "bilidown-cover-network-{label}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let url = serve_once(body, with_length).await;
+            let result =
+                fetch_with_policy(None, &dir, &url, AttachmentUrlPolicy::loopback_for_tests())
+                    .await;
+            if valid {
+                assert!(result.starts_with("data:image/jpeg;base64,"));
+                assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+            } else {
+                assert!(result.is_empty(), "{label}");
+                assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "{label}");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[tokio::test]

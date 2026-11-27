@@ -706,7 +706,7 @@ pub fn download_client(proxy: Option<&str>) -> BiliResult<Client> {
     builder.build().map_err(BiliError::from_reqwest)
 }
 
-fn apply_proxy(
+pub(crate) fn apply_proxy(
     mut builder: reqwest::ClientBuilder,
     proxy: Option<&str>,
 ) -> BiliResult<reqwest::ClientBuilder> {

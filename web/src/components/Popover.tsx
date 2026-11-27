@@ -1,6 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
+} from 'react';
 import { createPortal } from 'react-dom';
-import { motion } from 'motion/react';
+import { useAsyncComponent } from '../lib/asyncComponent';
 
 interface PopoverProps {
   open: boolean;
@@ -13,6 +21,13 @@ interface PopoverProps {
   className?: string;
   role?: 'menu' | 'listbox' | 'dialog';
   ariaLabel?: string;
+}
+
+const loadMotionPanel = () =>
+  import('./PopoverMotionPanel').then((module) => module.PopoverMotionPanel);
+
+export function preloadPopover() {
+  return loadMotionPanel();
 }
 
 /** 锚定浮层：portal + 视口内定位 + 外点/Esc 关闭（无箭头，shadow-pop） */
@@ -30,6 +45,7 @@ export function Popover({
 }: PopoverProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const motionPanel = useAsyncComponent(loadMotionPanel, open);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -86,25 +102,45 @@ export function Popover({
 
   if (!open) return null;
 
+  const panelClass = `glass-surface z-[70] rounded-pop border border-line bg-panel p-1 text-fg shadow-[var(--shadow-pop)] ${className ?? ''}`;
+  const panelStyle: CSSProperties = {
+    position: 'fixed',
+    top: pos?.top ?? -9999,
+    left: pos?.left ?? -9999,
+    width,
+    transformOrigin: side === 'top' ? 'bottom' : 'top',
+  };
+  if (motionPanel.error) {
+    return createPortal(
+      <div ref={panelRef} role="alert" className={panelClass} style={panelStyle}>
+        <div className="flex items-center gap-2 p-2 text-2xs">
+          <span className="min-w-0 flex-1">浮层加载失败</span>
+          <button type="button" className="text-accent" onClick={motionPanel.retry}>
+            重试
+          </button>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+  if (motionPanel.Page) {
+    return createPortal(
+      <motionPanel.Page
+        panelRef={panelRef}
+        role={role}
+        ariaLabel={ariaLabel}
+        className={panelClass}
+        style={panelStyle}
+      >
+        {children}
+      </motionPanel.Page>,
+      document.body,
+    );
+  }
   return createPortal(
-    <motion.div
-      ref={panelRef}
-      role={role}
-      aria-label={ariaLabel}
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.12, ease: [0.22, 1, 0.36, 1] }}
-      style={{
-        position: 'fixed',
-        top: pos?.top ?? -9999,
-        left: pos?.left ?? -9999,
-        width,
-        transformOrigin: side === 'top' ? 'bottom' : 'top',
-      }}
-      className={`glass-surface z-[70] rounded-pop border border-line bg-panel p-1 text-fg shadow-[var(--shadow-pop)] ${className ?? ''}`}
-    >
+    <div ref={panelRef} role={role} aria-label={ariaLabel} className={panelClass} style={panelStyle}>
       {children}
-    </motion.div>,
+    </div>,
     document.body,
   );
 }

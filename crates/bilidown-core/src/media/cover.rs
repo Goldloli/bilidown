@@ -6,7 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::api::client::{REFERER, UA};
+use crate::api::attachment::{
+    AttachmentUrlPolicy, image_format, read_attachment_body, send_attachment,
+};
 use crate::api::error::{BiliError, BiliResult};
 
 use super::filename;
@@ -54,10 +56,27 @@ pub async fn download_cover(
     video_path: &Path,
     out_dir: &Path,
 ) -> BiliResult<PathBuf> {
+    download_cover_with_policy(
+        http,
+        url,
+        video_path,
+        out_dir,
+        AttachmentUrlPolicy::default(),
+    )
+    .await
+}
+
+async fn download_cover_with_policy(
+    http: &reqwest::Client,
+    url: &str,
+    video_path: &Path,
+    out_dir: &Path,
+    policy: AttachmentUrlPolicy,
+) -> BiliResult<PathBuf> {
     let Some(stem) = video_path.file_stem().and_then(|s| s.to_str()) else {
         return Err(BiliError::InvalidInput);
     };
-    download_cover_named(http, url, stem, out_dir).await
+    download_cover_named_with_policy(http, url, stem, out_dir, policy).await
 }
 
 /// 按给定 stem 下载封面（测试/特殊命名场景）。
@@ -67,6 +86,16 @@ pub async fn download_cover_named(
     stem: &str,
     out_dir: &Path,
 ) -> BiliResult<PathBuf> {
+    download_cover_named_with_policy(http, url, stem, out_dir, AttachmentUrlPolicy::default()).await
+}
+
+async fn download_cover_named_with_policy(
+    http: &reqwest::Client,
+    url: &str,
+    stem: &str,
+    out_dir: &Path,
+    policy: AttachmentUrlPolicy,
+) -> BiliResult<PathBuf> {
     let candidates = cover_url_candidates(url);
     if candidates.is_empty() {
         return Err(BiliError::InvalidInput);
@@ -74,16 +103,10 @@ pub async fn download_cover_named(
     tokio::fs::create_dir_all(out_dir).await?;
     let mut last_err: Option<BiliError> = None;
     for candidate in candidates {
-        let resp = match http
-            .get(&candidate)
-            .header("Referer", REFERER)
-            .header("User-Agent", UA)
-            .send()
-            .await
-        {
+        let resp = match send_attachment(http, policy, &candidate).await {
             Ok(resp) => resp,
-            Err(e) => {
-                last_err = Some(BiliError::from_reqwest(e));
+            Err(error) => {
+                last_err = Some(error);
                 continue;
             }
         };
@@ -94,15 +117,20 @@ pub async fn download_cover_named(
             )));
             continue;
         }
-        match resp.bytes().await {
-            Ok(bytes) if !bytes.is_empty() => {
+        match read_attachment_body(resp).await {
+            Ok(bytes) if bytes.is_empty() => {
+                last_err = Some(BiliError::Parse("empty cover body".into()));
+            }
+            Ok(bytes) if image_format(&bytes).is_none() => {
+                last_err = Some(BiliError::Parse("invalid cover image".into()));
+            }
+            Ok(bytes) => {
                 let path = filename::dedupe_in_dir(out_dir, &cover_filename(stem));
                 tokio::fs::write(&path, &bytes).await?;
                 tracing::debug!(path = %path.display(), bytes = bytes.len(), "cover saved");
                 return Ok(path);
             }
-            Ok(_) => last_err = Some(BiliError::Parse("empty cover body".into())),
-            Err(e) => last_err = Some(BiliError::from_reqwest(e)),
+            Err(error) => last_err = Some(error),
         }
     }
     Err(last_err.unwrap_or_else(|| BiliError::Network("cover download failed".into())))
@@ -111,6 +139,9 @@ pub async fn download_cover_named(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::attachment::MAX_ATTACHMENT_BYTES;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn candidates_prefer_jpg_suffix_then_original() {
@@ -163,18 +194,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let video = dir.path().join("标题[1080P].mp4");
         let url = format!("{}/bfs/archive/abc.jpg", server.uri());
-        let path = download_cover(&client(), &url, &video, dir.path())
-            .await
-            .expect("封面应下载成功");
+        let path = download_cover_with_policy(
+            &client(),
+            &url,
+            &video,
+            dir.path(),
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await
+        .expect("封面应下载成功");
         assert_eq!(
             path.file_name().unwrap().to_str().unwrap(),
             "标题[1080P].jpg"
         );
         assert_eq!(std::fs::read(&path).unwrap(), image_bytes());
         // 重名去重
-        let path2 = download_cover(&client(), &url, &video, dir.path())
-            .await
-            .unwrap();
+        let path2 = download_cover_with_policy(
+            &client(),
+            &url,
+            &video,
+            dir.path(),
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             path2.file_name().unwrap().to_str().unwrap(),
             "标题[1080P] (1).jpg"
@@ -199,10 +242,129 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let video = dir.path().join("v.mp4");
         let url = format!("{}/abc.jpg", server.uri());
-        let path = download_cover(&client(), &url, &video, dir.path())
-            .await
-            .expect("回退原图应成功");
+        let path = download_cover_with_policy(
+            &client(),
+            &url,
+            &video,
+            dir.path(),
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await
+        .expect("回退原图应成功");
         assert_eq!(std::fs::read(&path).unwrap(), image_bytes());
+    }
+
+    #[tokio::test]
+    async fn accepts_existing_image_formats_without_changing_file_names() {
+        let jpeg = image_bytes();
+        let cases: [(&[u8], &str); 4] = [
+            (jpeg.as_slice(), "jpg"),
+            (b"\x89PNG\r\n", "png"),
+            (b"RIFF0000WEBP!", "webp"),
+            (b"GIF89a", "gif"),
+        ];
+        for (bytes, label) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let video = dir.path().join("v.mp4");
+            let url = format!("{}/cover", server.uri());
+            let path = download_cover_with_policy(
+                &client(),
+                &url,
+                &video,
+                dir.path(),
+                AttachmentUrlPolicy::loopback_for_tests(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(path.file_name().unwrap(), "v.jpg", "{label}");
+            assert_eq!(std::fs::read(path).unwrap(), bytes, "{label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_html_and_declared_oversize_without_writing() {
+        for (body, expected_requests) in [
+            (b"<html>not an image</html>".to_vec(), 1),
+            (vec![1; MAX_ATTACHMENT_BYTES + 1], 1),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/abc.jpg@.jpg"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("Content-Type", "image/jpeg")
+                        .set_body_bytes(body),
+                )
+                .expect(expected_requests)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/abc.jpg"))
+                .respond_with(ResponseTemplate::new(404))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let video = dir.path().join("v.mp4");
+            let url = format!("{}/abc.jpg", server.uri());
+            let result = download_cover_with_policy(
+                &client(),
+                &url,
+                &video,
+                dir.path(),
+                AttachmentUrlPolicy::loopback_for_tests(),
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_chunked_oversize_without_writing() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for request_index in 0..2 {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let mut buffer = [0u8; 4096];
+                    let _ = socket.read(&mut buffer).await;
+                    if request_index == 0 {
+                        let _ = socket
+                            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                            .await;
+                        let _ = socket.write_all(&vec![1; MAX_ATTACHMENT_BYTES + 1]).await;
+                    } else {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                    }
+                }
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("v.mp4");
+        let url = format!("http://{addr}/abc.jpg");
+        let result = download_cover_with_policy(
+            &client(),
+            &url,
+            &video,
+            dir.path(),
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
@@ -223,9 +385,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let video = dir.path().join("v.mp4");
         let url = format!("{}/empty.jpg", server.uri());
-        let err = download_cover(&client(), &url, &video, dir.path())
-            .await
-            .expect_err("空响应应失败");
+        let err = download_cover_with_policy(
+            &client(),
+            &url,
+            &video,
+            dir.path(),
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await
+        .expect_err("空响应应失败");
         assert!(matches!(err, BiliError::Parse(_)), "{err:?}");
     }
 
@@ -247,9 +415,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let video = dir.path().join("v.mp4");
         let url = format!("{}/gone.jpg", server.uri());
-        let err = download_cover(&client(), &url, &video, dir.path())
-            .await
-            .expect_err("应失败");
+        let err = download_cover_with_policy(
+            &client(),
+            &url,
+            &video,
+            dir.path(),
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await
+        .expect_err("应失败");
         assert!(matches!(err, BiliError::Network(_)), "{err:?}");
     }
 

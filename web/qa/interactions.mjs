@@ -114,6 +114,61 @@ async function captureArtifactViews(browser) {
   return manifest;
 }
 
+async function checkPopoverInteractions(page, browser) {
+  const panelRequests = [];
+  const onRequest = (request) => {
+    if (request.url().includes('/src/components/PopoverMotionPanel.tsx')) {
+      panelRequests.push(request.url());
+    }
+  };
+  page.on('request', onRequest);
+  await page.goto(`${BASE}/?mock=1&qa=1&scenario=empty&os=macos`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await page.waitForFunction(() => document.documentElement.dataset.ready === '1');
+  if (panelRequests.length !== 0) throw new Error('关闭状态不应阻塞首屏加载动画面板');
+
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  const search = page.getByRole('textbox', { name: '搜索' });
+  await search.waitFor();
+  if (panelRequests.length === 0) throw new Error('首次打开应按需加载动画面板');
+  const searchBox = await search.boundingBox();
+  const viewport = page.viewportSize();
+  if (!searchBox || !viewport || searchBox.x < 0 || searchBox.y < 0 || searchBox.x + searchBox.width > viewport.width || searchBox.y + searchBox.height > viewport.height) {
+    throw new Error('搜索弹层超出视口');
+  }
+  await page.locator('body').click({ position: { x: 4, y: 4 } });
+  await search.waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: '搜索', exact: true }).click();
+  await search.waitFor();
+  await page.keyboard.press('Escape');
+  await search.waitFor({ state: 'detached' });
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.getByRole('button', { name: '帮助', exact: true }).click();
+  await page.getByText('快捷键', { exact: true }).waitFor();
+  await page.keyboard.press('Escape');
+  await page.getByText('快捷键', { exact: true }).waitFor({ state: 'detached' });
+  page.off('request', onRequest);
+
+  const failureContext = await browser.newContext();
+  const failurePage = await failureContext.newPage();
+  let blockPanel = true;
+  await failurePage.route('**/src/components/PopoverMotionPanel.tsx*', (route) =>
+    blockPanel ? route.abort() : route.continue(),
+  );
+  await failurePage.goto(`${BASE}/?mock=1&qa=1&scenario=empty&os=macos`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await failurePage.waitForFunction(() => document.documentElement.dataset.ready === '1');
+  await failurePage.getByRole('button', { name: '搜索', exact: true }).click();
+  await failurePage.getByText('浮层加载失败', { exact: true }).waitFor();
+  blockPanel = false;
+  await failurePage.getByRole('button', { name: '重试', exact: true }).click();
+  await failurePage.getByRole('textbox', { name: '搜索' }).waitFor();
+  await failureContext.close();
+}
+
 async function main() {
   const server = await ensureServer();
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -138,6 +193,8 @@ async function main() {
       .locator('.win-controls')
       .evaluate((element) => getComputedStyle(element).display);
     if (windowsControls !== 'flex') throw new Error('Windows 应显示自绘窗口按钮');
+
+    await checkPopoverInteractions(page, browser);
 
     const dialog = await openPanel(page);
 
@@ -216,7 +273,7 @@ async function main() {
     process.exitCode = 1;
   } else {
     console.log(
-      `交互检查通过：空选择、固定偏好、多产物打开与旧记录标识符合规格；截图 ${path.relative(ROOT, ARTIFACT_OUT)}`,
+      `交互检查通过：空选择、固定偏好、多产物、弹层交互与加载失败重试符合规格；截图 ${path.relative(ROOT, ARTIFACT_OUT)}`,
     );
   }
 }

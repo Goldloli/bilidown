@@ -1,14 +1,15 @@
 import '../../i18n/zh-CN.dynamic';
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { t, type StringKey } from '../../i18n/zh-CN';
 import { APP_BUILD, APP_VERSION } from '../../lib/constants';
 import { api } from '../../lib/ipc';
-import { formatBytes, formatSpeed } from '../../lib/format';
+import { formatBytes, formatSpeed, formatStarCount } from '../../lib/format';
 import { isPending, pendingLabel } from '../../lib/capabilities';
 import {
   cancelAppUpdateDownload,
   checkAppUpdate,
   getAppUpdateState,
+  getRepositoryStars,
   installAppUpdate,
   openAboutLink,
   openDownloadedUpdate,
@@ -39,6 +40,20 @@ const LINK_KEYS: Record<AboutLink, StringKey> = {
 
 const IDLE_STATE: AppUpdateState = { status: 'idle', downloadedBytes: 0 };
 
+/** Star 徽章：数字未知（获取失败/未加载）时不渲染，静默降级不占位 */
+export function RepositoryStarBadge({ stars }: { stars: number | null }) {
+  if (stars === null) return null;
+  return (
+    <span
+      className="num inline-flex items-center gap-0.5 text-2xs text-fg2"
+      aria-label={t('settings.about.stars', { count: formatStarCount(stars) })}
+    >
+      <Icon name="star" size={11} className="text-warning" />
+      {formatStarCount(stars)}
+    </span>
+  );
+}
+
 /** Tauri 命令错误是对象，避免界面出现 [object Object] */
 function errorText(error: unknown): string {
   if (typeof error === 'string') return error;
@@ -59,6 +74,7 @@ export function AboutPage() {
   const pushToast = useUiStore((s) => s.pushToast);
   const [info, setInfo] = useState<AppInfoDTO | null>(null);
   const [state, setState] = useState<AppUpdateState>(IDLE_STATE);
+  const [stars, setStars] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
   const version = info?.version ?? APP_VERSION;
@@ -79,6 +95,9 @@ export function AboutPage() {
         if (!mounted) return;
         setState({ status: 'error', downloadedBytes: 0, error: errorText(error) });
       });
+    getRepositoryStars()
+      .then((result) => mounted && setStars(result))
+      .catch(() => undefined);
     const unsubscribe = subscribeAppUpdate((next) => setState(next));
     return () => {
       mounted = false;
@@ -323,15 +342,29 @@ export function AboutPage() {
 
       <SettingsGroup title={t('settings.about.links')}>
         {LINKS.map((link) => (
-          <button
-            key={link}
-            type="button"
-            onClick={() => void openLink(link)}
-            className="flex w-full items-center justify-between py-2 text-left hover:text-accent"
-          >
-            <span className="text-sm text-fg">{t(LINK_KEYS[link])}</span>
-            <Icon name="external" size={12} className="text-fg3" />
-          </button>
+          <Fragment key={link}>
+            <button
+              type="button"
+              onClick={() => void openLink(link)}
+              className="flex w-full items-center justify-between py-2 text-left hover:text-accent"
+            >
+              <span className="flex items-center gap-1.5 text-sm text-fg">
+                {t(LINK_KEYS[link])}
+                {link === 'repository' && <RepositoryStarBadge stars={stars} />}
+              </span>
+              <Icon name="external" size={12} className="text-fg3" />
+            </button>
+            {link === 'repository' && (
+              <button
+                type="button"
+                onClick={() => void openLink('repository')}
+                className="-mt-1 flex w-full items-center gap-1 pb-2 text-left text-2xs text-fg2 hover:text-accent"
+              >
+                <Icon name="star" size={11} className="text-warning" />
+                {t('settings.about.starHint')}
+              </button>
+            )}
+          </Fragment>
         ))}
         <div className="flex items-center justify-between py-2">
           <span className="text-sm text-fg">{t('settings.about.copyright')}</span>

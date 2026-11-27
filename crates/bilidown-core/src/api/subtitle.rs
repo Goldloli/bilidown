@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::attachment::{
+    AttachmentUrlPolicy, attachment_client, read_attachment_body, send_attachment,
+};
 use super::client::BiliClient;
 use super::error::{BiliError, BiliResult};
 use super::wbi;
@@ -189,10 +192,30 @@ pub async fn player_subtitles(
 
 /// 下载单条字幕并转换为 SRT 文本。
 pub async fn download_srt(client: &BiliClient, track: &SubtitleTrack) -> BiliResult<String> {
+    let http = attachment_client(client.proxy(), AttachmentUrlPolicy::default())?;
+    download_srt_with_client(&http, AttachmentUrlPolicy::default(), track).await
+}
+
+async fn download_srt_with_client(
+    http: &reqwest::Client,
+    policy: AttachmentUrlPolicy,
+    track: &SubtitleTrack,
+) -> BiliResult<String> {
     let url = normalize_subtitle_url(&track.subtitle_url)
         .ok_or_else(|| BiliError::Parse(format!("invalid subtitle url: {}", track.subtitle_url)))?;
-    let text = client.get_text(&url).await?;
-    let cues = parse_subtitle_json(&text)?;
+    let response = send_attachment(http, policy, &url).await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            401 | 403 | 404 => BiliError::Permission {
+                message: format!("HTTP {status}"),
+            },
+            412 | 429 => BiliError::RiskControl,
+            _ => BiliError::Network(format!("HTTP {status}")),
+        });
+    }
+    let bytes = read_attachment_body(response).await?;
+    let cues = parse_subtitle_json(&String::from_utf8_lossy(&bytes))?;
     if cues.is_empty() {
         return Err(BiliError::Parse("subtitle body empty".into()));
     }
@@ -216,17 +239,43 @@ pub async fn save_subtitles(
     out_dir: &Path,
     cancel: Option<&tokio_util::sync::CancellationToken>,
 ) -> (Vec<PathBuf>, Vec<String>) {
+    save_subtitles_with_policy(
+        client,
+        tracks,
+        video_path,
+        out_dir,
+        cancel,
+        AttachmentUrlPolicy::default(),
+    )
+    .await
+}
+
+async fn save_subtitles_with_policy(
+    client: &BiliClient,
+    tracks: &[SubtitleTrack],
+    video_path: &Path,
+    out_dir: &Path,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    policy: AttachmentUrlPolicy,
+) -> (Vec<PathBuf>, Vec<String>) {
     let mut saved = Vec::new();
     let mut errors = Vec::new();
     let Some(stem) = video_path.file_stem().and_then(|s| s.to_str()) else {
         return (saved, vec!["invalid video path".to_string()]);
+    };
+    if tracks.is_empty() {
+        return (saved, errors);
+    }
+    let http = match attachment_client(client.proxy(), policy) {
+        Ok(http) => http,
+        Err(error) => return (saved, vec![error.describe()]),
     };
     for track in tracks {
         if cancel.is_some_and(|c| c.is_cancelled()) {
             errors.push("cancelled before subtitle download".into());
             break;
         }
-        match download_srt(client, track).await {
+        match download_srt_with_client(&http, policy, track).await {
             Ok(srt) => {
                 let path = filename::dedupe_in_dir(out_dir, &srt_filename(stem, &track.lan));
                 match tokio::fs::write(&path, srt.as_bytes()).await {
@@ -401,12 +450,13 @@ mod tests {
             lan_doc: "中文".into(),
             subtitle_url: format!("{}/sub-zh.json", server.uri()),
         };
-        let (saved, errors) = save_subtitles(
+        let (saved, errors) = save_subtitles_with_policy(
             &client,
             std::slice::from_ref(&track),
             &video,
             dir.path(),
             None,
+            AttachmentUrlPolicy::loopback_for_tests(),
         )
         .await;
         assert!(errors.is_empty(), "{errors:?}");
@@ -418,11 +468,107 @@ mod tests {
         let text = std::fs::read_to_string(&saved[0]).unwrap();
         assert!(text.starts_with("1\n00:00:00,000 --> 00:00:01,500\n你好\n\n"));
         // 重复下载不覆盖：追加 (1)
-        let (saved2, _) = save_subtitles(&client, &[track], &video, dir.path(), None).await;
+        let (saved2, _) = save_subtitles_with_policy(
+            &client,
+            &[track],
+            &video,
+            dir.path(),
+            None,
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await;
         assert_eq!(
             saved2[0].file_name().unwrap().to_str().unwrap(),
             "标题[1080P].zh-CN (1).srt"
         );
+    }
+
+    #[tokio::test]
+    async fn subtitle_request_does_not_send_login_cookies() {
+        use crate::api::client::StoredCookies;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sub-zh.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"body":[{"from":0.0,"to":1.5,"content":"你好"}]}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("v.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        let client = BiliClient::with_http(
+            reqwest::Client::new(),
+            StoredCookies::from_pairs([
+                ("SESSDATA".into(), "secret".into()),
+                ("bili_jct".into(), "csrf".into()),
+            ]),
+        );
+        let track = SubtitleTrack {
+            lan: "zh-CN".into(),
+            lan_doc: "中文".into(),
+            subtitle_url: format!("{}/sub-zh.json", server.uri()),
+        };
+        let (saved, errors) = save_subtitles_with_policy(
+            &client,
+            &[track],
+            &video,
+            dir.path(),
+            None,
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(saved.len(), 1, "{errors:?}");
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests[0].headers.contains_key("cookie"));
+    }
+
+    #[tokio::test]
+    async fn streamed_oversize_subtitle_keeps_main_video_and_writes_no_srt() {
+        use crate::api::attachment::MAX_ATTACHMENT_BYTES;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = [0u8; 4096];
+                let _ = socket.read(&mut buffer).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .await;
+                let _ = socket
+                    .write_all(&vec![b'x'; MAX_ATTACHMENT_BYTES + 1])
+                    .await;
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("v.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        let (client, _http) = test_client();
+        let track = SubtitleTrack {
+            lan: "zh-CN".into(),
+            lan_doc: "中文".into(),
+            subtitle_url: format!("http://{addr}/sub-zh.json"),
+        };
+        let (saved, errors) = save_subtitles_with_policy(
+            &client,
+            &[track],
+            &video,
+            dir.path(),
+            None,
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await;
+        assert!(saved.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(video.is_file());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]
@@ -443,7 +589,15 @@ mod tests {
             lan_doc: "English".into(),
             subtitle_url: format!("{}/bad.json", server.uri()),
         };
-        let (saved, errors) = save_subtitles(&client, &[track], &video, dir.path(), None).await;
+        let (saved, errors) = save_subtitles_with_policy(
+            &client,
+            &[track],
+            &video,
+            dir.path(),
+            None,
+            AttachmentUrlPolicy::loopback_for_tests(),
+        )
+        .await;
         assert!(saved.is_empty());
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("en-US"));

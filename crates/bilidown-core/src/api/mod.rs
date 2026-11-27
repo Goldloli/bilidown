@@ -14,6 +14,7 @@
 //! - [`subtitle`]：字幕列表/JSON → SRT（可选后处理，change add-download-features D2）
 
 pub mod account;
+pub mod attachment;
 pub mod audio;
 pub mod client;
 pub mod error;

@@ -2,7 +2,6 @@ import { useRef, useState } from 'react';
 import { t } from '../i18n/zh-CN';
 import { api } from '../lib/ipc';
 import { showsSettingsShortcut } from '../lib/platform';
-import { addFromClipboard } from '../lib/actions';
 import { statusSummary } from '../lib/taskDisplay';
 import { useHistoryStore } from '../stores/useHistoryStore';
 import { useQueueStore } from '../stores/useQueueStore';
@@ -82,7 +81,7 @@ export function BottomBar() {
       <IconButton
         icon="clipboard"
         label={t('bottombar.clipboard')}
-        onClick={() => void addFromClipboard()}
+        onClick={() => void import('../lib/actions').then(({ addFromClipboard }) => addFromClipboard())}
       />
       {showsSettingsShortcut() && (
         <IconButton

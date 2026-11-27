@@ -9,6 +9,7 @@ import { useStartupStore } from '../stores/useStartupStore';
 import { useUiStore } from '../stores/useUiStore';
 import { Icon } from '../components/Icon';
 import { QueueRowSkeleton } from '../components/Skeleton';
+import { preloadPopover } from '../components/Popover';
 import { BottomBar } from './BottomBar';
 import { PanelHost } from './PanelHost';
 import { TitleBar } from './TitleBar';
@@ -49,7 +50,7 @@ export function MainWindow() {
     if (!ready || devParams().scenario !== 'season-confirm') return;
     // 仅截图场景需要的 Mock 数据按需加载，不进入首屏包（tasks 8.1）。
     void (async () => {
-      const { mockUgcSeason } = await import('../lib/collection');
+      const { mockUgcSeason } = await import('../dev/ugcSeason');
       const ui = useUiStore.getState();
       const season = mockUgcSeason();
       void ui.confirm({
@@ -68,7 +69,11 @@ export function MainWindow() {
         document.documentElement.dataset.ready = '1';
       }),
     );
-    return () => cancelAnimationFrame(raf);
+    const preloadTimer = window.setTimeout(() => void preloadPopover().catch(() => undefined), 1200);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(preloadTimer);
+    };
   }, [ready]);
 
   useEffect(() => {

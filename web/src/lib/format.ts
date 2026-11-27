@@ -50,6 +50,13 @@ export function formatCount(n: number | null | undefined): string {
   return `${n}`;
 }
 
+/** GitHub Star 数：<1000 原样；≥1000 紧凑一位小数加 k（去 .0 尾零），如 1.2k */
+export function formatStarCount(count: number | null | undefined): string {
+  if (count == null || !Number.isFinite(count) || count < 0) return '—';
+  if (count < 1000) return `${Math.round(count)}`;
+  return `${trim1(count / 1000)}k`;
+}
+
 export function formatWordCount(n: number | null | undefined): string {
   if (n == null) return '—';
   return `${n} 字`;

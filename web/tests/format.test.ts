@@ -7,6 +7,7 @@ import {
   formatEta,
   formatPercent,
   formatSpeed,
+  formatStarCount,
 } from '../src/lib/format';
 
 describe('format（统一中文数字/时间格式化）', () => {
@@ -38,6 +39,18 @@ describe('format（统一中文数字/时间格式化）', () => {
     expect(formatPercent(0.452, 1)).toBe('45.2%');
     expect(formatPercent(1.4)).toBe('100%');
     expect(formatPercent(-1)).toBe('0%');
+  });
+
+  it('Star 数格式化：<1000 原样，≥1000 紧凑 k，非法值降级', () => {
+    expect(formatStarCount(null)).toBe('—');
+    expect(formatStarCount(-1)).toBe('—');
+    expect(formatStarCount(NaN)).toBe('—');
+    expect(formatStarCount(0)).toBe('0');
+    expect(formatStarCount(999)).toBe('999');
+    expect(formatStarCount(1000)).toBe('1k');
+    expect(formatStarCount(1200)).toBe('1.2k');
+    expect(formatStarCount(1500)).toBe('1.5k');
+    expect(formatStarCount(1_000_000)).toBe('1000k');
   });
 
   it('日期分组与时间文案（今天/昨天/同年/跨年）', () => {

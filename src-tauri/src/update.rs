@@ -109,12 +109,21 @@ pub struct AppUpdateCheck {
     pub releases_url: String,
 }
 
+/// 关于页展示的仓库 Star 数；获取失败为 null，由前端静默降级。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryStars {
+    pub stars: Option<u64>,
+}
+
 /// 托管在应用内的更新状态（`tauri::Manager::manage`）。
 pub struct AppUpdateState {
     cancel: AtomicBool,
     snapshot: Mutex<AppUpdateSnapshot>,
     /// 最近一次检查解析出的候选版本（start_app_update_download 使用，避免重复请求 API）。
     last_check: Mutex<Option<ResolvedRelease>>,
+    /// 会话级 Star 数缓存：命中直接返回；失败不写入，下次打开关于页自然重试。
+    stars_cache: Mutex<Option<u64>>,
 }
 
 async fn update_transport(app: &AppHandle) -> Result<UpdateTransport, String> {
@@ -132,6 +141,7 @@ impl Default for AppUpdateState {
             cancel: AtomicBool::new(false),
             snapshot: Mutex::new(AppUpdateSnapshot::default()),
             last_check: Mutex::new(None),
+            stars_cache: Mutex::new(None),
         }
     }
 }
@@ -142,6 +152,16 @@ impl AppUpdateState {
             .lock()
             .map(|guard| guard.clone())
             .map_err(|error| format!("读取更新状态失败: {error}"))
+    }
+
+    fn cached_stars(&self) -> Option<u64> {
+        self.stars_cache.lock().ok().and_then(|guard| *guard)
+    }
+
+    fn store_stars(&self, count: u64) {
+        if let Ok(mut guard) = self.stars_cache.lock() {
+            *guard = Some(count);
+        }
     }
 }
 
@@ -169,6 +189,13 @@ struct GitHubRelease {
     html_url: String,
     #[serde(default)]
     assets: Vec<GitHubAsset>,
+}
+
+/// GitHub 仓库信息（只取 Star 数；字段缺失降级为 None）。
+#[derive(Debug, Deserialize)]
+struct GitHubRepoInfo {
+    #[serde(default)]
+    stargazers_count: Option<u64>,
 }
 
 /// 已解析的候选版本（版本 + Release + 安装包/校验文件资产）。
@@ -448,6 +475,60 @@ async fn fetch_releases(transport: &UpdateTransport) -> Result<Vec<GitHubRelease
         .json::<Vec<GitHubRelease>>()
         .await
         .map_err(|error| format!("解析 GitHub Releases 失败: {error}"))
+}
+
+/// 解析 GitHub 仓库响应中的 stargazers_count；字段缺失或响应非法返回 None。
+fn parse_stargazers_count(body: &str) -> Option<u64> {
+    serde_json::from_str::<GitHubRepoInfo>(body)
+        .ok()
+        .and_then(|info| info.stargazers_count)
+}
+
+/// 仓库信息响应映射：限流（403/429）与仓库缺失（404）静默降级为 None。
+fn map_repo_response(status: reqwest::StatusCode, body: &str) -> Result<Option<u64>, String> {
+    if status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::NOT_FOUND
+    {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(format!("获取仓库 Star 数失败：GitHub API 返回 HTTP {status}。"));
+    }
+    Ok(parse_stargazers_count(body))
+}
+
+async fn fetch_repository_stars(transport: &UpdateTransport) -> Result<Option<u64>, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("x-github-api-version"),
+        reqwest::header::HeaderValue::from_static("2022-11-28"),
+    );
+    let response = transport
+        .get(
+            &format!("https://api.github.com/repos/{REPO}"),
+            headers,
+            Some(API_TIMEOUT),
+        )
+        .await
+        .map_err(|error| format!("获取仓库 Star 数失败（网络）: {error}"))?;
+    let status = response.status();
+    validate_response_url(response.url())?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > 8 * 1024 * 1024)
+    {
+        return Err("GitHub 仓库响应体过大，已拒绝。".into());
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("读取 GitHub 仓库响应失败: {error}"))?;
+    map_repo_response(status, &body)
 }
 
 async fn fetch_expected_checksum(
@@ -886,6 +967,37 @@ pub fn get_app_version(app: AppHandle) -> AppVersionInfo {
         version: app.package_info().version.to_string(),
         target: target_label().to_string(),
         installer_kind: installer_kind().map(str::to_string),
+    }
+}
+
+/// 关于页 Star 数：会话缓存命中直接返回；失败（含限流）返回 null 由前端静默降级。
+/// 永不返回 Err，保证关于页其余内容不受影响。
+pub async fn get_repository_stars(
+    app: AppHandle,
+    state: tauri::State<'_, AppUpdateState>,
+) -> RepositoryStars {
+    if let Some(cached) = state.cached_stars() {
+        return RepositoryStars {
+            stars: Some(cached),
+        };
+    }
+    let result = async {
+        let transport = update_transport(&app).await?;
+        fetch_repository_stars(&transport).await
+    }
+    .await;
+    match result {
+        Ok(Some(count)) => {
+            state.store_stars(count);
+            RepositoryStars {
+                stars: Some(count),
+            }
+        }
+        Ok(None) => RepositoryStars { stars: None },
+        Err(message) => {
+            tracing::warn!(target: "shell::update", error = %message, "获取仓库 Star 数失败");
+            RepositoryStars { stars: None }
+        }
     }
 }
 
@@ -1391,6 +1503,45 @@ mod tests {
         }
         assert_eq!(about_link_url("https://example.com"), None);
         assert_eq!(about_link_url("unknown"), None);
+    }
+
+    #[test]
+    fn stargazers_count_parses_and_missing_or_invalid_is_none() {
+        assert_eq!(
+            parse_stargazers_count(r#"{"stargazers_count":128}"#),
+            Some(128)
+        );
+        assert_eq!(
+            parse_stargazers_count(r#"{"name":"bilidown"}"#),
+            None
+        );
+        assert_eq!(parse_stargazers_count("not json"), None);
+        assert_eq!(
+            parse_stargazers_count(r#"{"stargazers_count":-1}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn repo_response_maps_rate_limit_and_missing_repo_to_silent_none() {
+        use reqwest::StatusCode;
+        assert_eq!(map_repo_response(StatusCode::FORBIDDEN, ""), Ok(None));
+        assert_eq!(map_repo_response(StatusCode::TOO_MANY_REQUESTS, ""), Ok(None));
+        assert_eq!(map_repo_response(StatusCode::NOT_FOUND, ""), Ok(None));
+        assert!(map_repo_response(StatusCode::INTERNAL_SERVER_ERROR, "").is_err());
+        assert_eq!(
+            map_repo_response(StatusCode::OK, r#"{"stargazers_count":42}"#),
+            Ok(Some(42))
+        );
+        assert_eq!(map_repo_response(StatusCode::OK, "bad body"), Ok(None));
+    }
+
+    #[test]
+    fn stars_cache_hit_returns_cached_value() {
+        let state = AppUpdateState::default();
+        assert_eq!(state.cached_stars(), None);
+        state.store_stars(128);
+        assert_eq!(state.cached_stars(), Some(128));
     }
 
     #[test]

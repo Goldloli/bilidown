@@ -876,11 +876,34 @@ pub fn read_clipboard_text(app: AppHandle) -> CommandResult<String> {
         .map_err(|e| AppErrorDTO::new("unknown", format!("读剪贴板失败: {e}")))
 }
 
+fn validate_external_url(raw: &str) -> CommandResult<reqwest::Url> {
+    let url = reqwest::Url::parse(raw.trim()).map_err(|_| {
+        AppErrorDTO::new(
+            "invalid-argument",
+            "链接格式无效，请输入有效的 HTTPS 地址。",
+        )
+    })?;
+    if url.scheme() != "https" {
+        return Err(AppErrorDTO::new("invalid-argument", "仅支持 HTTPS 链接。"));
+    }
+    if url.host_str().is_none() {
+        return Err(AppErrorDTO::new("invalid-argument", "链接缺少有效主机。"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(AppErrorDTO::new(
+            "invalid-argument",
+            "链接不得包含用户名或密码。",
+        ));
+    }
+    Ok(url)
+}
+
 #[tauri::command]
 pub fn open_external(app: AppHandle, url: String) -> CommandResult<()> {
     use tauri_plugin_opener::OpenerExt;
+    let url = validate_external_url(&url)?;
     app.opener()
-        .open_url(url, None::<&str>)
+        .open_url(url.to_string(), None::<&str>)
         .map_err(|e| AppErrorDTO::new("unknown", format!("打开链接失败: {e}")))
 }
 
@@ -1027,6 +1050,15 @@ pub fn open_about_link(app: AppHandle, link: String) -> CommandResult<()> {
         .map_err(|message| AppErrorDTO::new("unknown", message))
 }
 
+/// 关于页 Star 数；失败静默降级为 null（stars 为 None，命令本身始终成功）。
+#[tauri::command]
+pub async fn get_repository_stars(
+    app: AppHandle,
+    state: State<'_, crate::update::AppUpdateState>,
+) -> CommandResult<crate::update::RepositoryStars> {
+    Ok(crate::update::get_repository_stars(app, state).await)
+}
+
 /// UGC 合集：`parse → resolve_content` 后调用；`null` 表示普通单视频（保持原行为）。
 #[tauri::command]
 pub async fn resolve_ugc_season(
@@ -1151,4 +1183,31 @@ pub async fn dev_request_quit(app: AppHandle) -> bool {
         events::notice(&app, "info", "当前无活跃任务，可退出");
     }
     prevented
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_url_accepts_https_and_rejects_unsafe_targets() {
+        for valid in [
+            "https://ffmpeg.org/download.html",
+            "https://example.com/path?q=1",
+        ] {
+            assert!(validate_external_url(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "file:///tmp/example",
+            "bilidown://open",
+            "http://example.com",
+            "not a url",
+            "https://user:pass@example.com",
+            "https://:pass@example.com",
+        ] {
+            let error = validate_external_url(invalid).unwrap_err();
+            assert_eq!(error.kind, "invalid-argument", "{invalid}");
+            assert!(!error.message.is_empty(), "{invalid}");
+        }
+    }
 }

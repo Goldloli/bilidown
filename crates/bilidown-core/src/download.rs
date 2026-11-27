@@ -8,6 +8,8 @@
 //! - 进度以回调上报（结构化，由任务层节流聚合）。
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -30,6 +32,9 @@ pub struct DownloadProgress {
     pub total: u64,
 }
 
+#[cfg(test)]
+type RenameHook = Arc<dyn Fn(&Path, &Path) -> std::io::Result<()> + Send + Sync>;
+
 /// 下载参数。
 pub struct DownloadRequest<'a> {
     pub http: &'a reqwest::Client,
@@ -40,6 +45,8 @@ pub struct DownloadRequest<'a> {
     pub cancel: &'a CancellationToken,
     /// 读空闲超时（测试可调小）。
     pub read_idle_timeout: Duration,
+    #[cfg(test)]
+    rename_hook: Option<RenameHook>,
 }
 
 impl<'a> DownloadRequest<'a> {
@@ -55,6 +62,8 @@ impl<'a> DownloadRequest<'a> {
             dest,
             cancel,
             read_idle_timeout: DEFAULT_READ_IDLE_TIMEOUT,
+            #[cfg(test)]
+            rename_hook: None,
         }
     }
 }
@@ -79,11 +88,11 @@ pub async fn download_stream(
             return Err(BiliError::Cancelled);
         }
         // 每次尝试前重新读取续传偏移（备用 URL 场景修正）
-        let offset = file_len(&part).await;
+        let mut offset = file_len(&part).await;
         let mut allow_redownload = true;
         loop {
             match download_one(req, url, &part, offset, &mut on_progress).await {
-                Ok(n) => match tokio::fs::rename(&part, req.dest).await {
+                Ok(n) => match rename_part(req, &part).await {
                     Ok(()) => {
                         on_progress(DownloadProgress {
                             downloaded: n,
@@ -93,7 +102,7 @@ pub async fn download_stream(
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound && allow_redownload => {
                         // `.part` 在下载完成与重命名之间消失（索引/外部清理/同目录冲突）：
-                        // 从头重下一次当前 URL，避免把一次瞬时文件丢失直接判定为任务失败。
+                        // 偏移归零后从头重下一次当前 URL，避免把一次瞬时文件丢失直接判定为任务失败。
                         tracing::warn!(
                             target: "bilidown_core::download",
                             part = %part.display(),
@@ -103,6 +112,7 @@ pub async fn download_stream(
                         );
                         allow_redownload = false;
                         let _ = tokio::fs::remove_file(&part).await;
+                        offset = 0;
                     }
                     Err(e) => {
                         return Err(BiliError::Disk(format!(
@@ -121,6 +131,14 @@ pub async fn download_stream(
         }
     }
     Err(last_err.unwrap_or_else(|| BiliError::Network("all urls failed".into())))
+}
+
+async fn rename_part(req: &DownloadRequest<'_>, part: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(hook) = &req.rename_hook {
+        return hook(part, req.dest);
+    }
+    tokio::fs::rename(part, req.dest).await
 }
 
 async fn download_one(
@@ -344,7 +362,16 @@ pub async fn download_stream_to_channel(
 mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Match, Mock, MockServer, ResponseTemplate};
+
+    #[derive(Debug)]
+    struct WithoutRange;
+
+    impl Match for WithoutRange {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            !request.headers.contains_key("range")
+        }
+    }
 
     fn client() -> reqwest::Client {
         reqwest::Client::builder().no_proxy().build().unwrap()
@@ -364,6 +391,7 @@ mod tests {
             dest,
             cancel,
             read_idle_timeout: Duration::from_millis(idle_ms),
+            rename_hook: None,
         };
         download_stream(&req, |p| seen.push(p)).await
     }
@@ -399,6 +427,7 @@ mod tests {
                     .insert_header("Content-Range", "bytes 100-199/200")
                     .set_body_bytes(vec![2u8; 100]),
             )
+            .expect(1)
             .mount(&server)
             .await;
         let dir = tempfile::tempdir().unwrap();
@@ -538,6 +567,146 @@ mod tests {
         assert!(part_of(&d).exists(), "暂停/取消时保留 .part 由上层清理");
         cleanup(&d).await;
         assert!(!part_of(&d).exists());
+    }
+
+    #[tokio::test]
+    async fn missing_part_before_rename_restarts_from_zero() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let server = MockServer::start().await;
+        let full: Vec<u8> = std::iter::repeat_n(1u8, 100)
+            .chain(std::iter::repeat_n(2u8, 100))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/v.m4s"))
+            .and(header("range", "bytes=100-"))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("Content-Range", "bytes 100-199/200")
+                    .set_body_bytes(vec![2u8; 100]),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v.m4s"))
+            .and(WithoutRange)
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(full.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("v.m4s");
+        std::fs::write(part_of(&dest), vec![1u8; 100]).unwrap();
+        let urls = vec![format!("{}/v.m4s", server.uri())];
+        let cancel = CancellationToken::new();
+        let http = client();
+        let rename_calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&rename_calls);
+        let req = DownloadRequest {
+            http: &http,
+            urls: &urls,
+            dest: &dest,
+            cancel: &cancel,
+            read_idle_timeout: Duration::from_secs(5),
+            rename_hook: Some(Arc::new(move |part, dest| {
+                if hook_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "injected rename loss",
+                    ))
+                } else {
+                    std::fs::rename(part, dest)
+                }
+            })),
+        };
+
+        let n = download_stream(&req, |_| {}).await.unwrap();
+        assert_eq!(n, 200);
+        assert_eq!(std::fs::read(&dest).unwrap(), full);
+        assert_eq!(rename_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_part_without_offset_redownloads_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v.m4s"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8; 200]))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("v.m4s");
+        let urls = vec![format!("{}/v.m4s", server.uri())];
+        let cancel = CancellationToken::new();
+        let http = client();
+        let rename_calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&rename_calls);
+        let req = DownloadRequest {
+            http: &http,
+            urls: &urls,
+            dest: &dest,
+            cancel: &cancel,
+            read_idle_timeout: Duration::from_secs(5),
+            rename_hook: Some(Arc::new(move |part, dest| {
+                if hook_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "injected rename loss",
+                    ))
+                } else {
+                    std::fs::rename(part, dest)
+                }
+            })),
+        };
+
+        let n = download_stream(&req, |_| {}).await.unwrap();
+        assert_eq!(n, 200);
+        assert_eq!(std::fs::read(&dest).unwrap(), vec![7u8; 200]);
+        assert_eq!(rename_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn second_rename_failure_is_returned() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v.m4s"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8; 200]))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("v.m4s");
+        let urls = vec![format!("{}/v.m4s", server.uri())];
+        let cancel = CancellationToken::new();
+        let http = client();
+        let rename_calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&rename_calls);
+        let req = DownloadRequest {
+            http: &http,
+            urls: &urls,
+            dest: &dest,
+            cancel: &cancel,
+            read_idle_timeout: Duration::from_secs(5),
+            rename_hook: Some(Arc::new(move |_, _| {
+                hook_calls.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "injected repeated rename loss",
+                ))
+            })),
+        };
+
+        let err = download_stream(&req, |_| {}).await.unwrap_err();
+        assert!(matches!(err, BiliError::Disk(_)), "{err:?}");
+        assert_eq!(rename_calls.load(Ordering::SeqCst), 2);
+        assert!(!dest.exists());
     }
 
     #[tokio::test]

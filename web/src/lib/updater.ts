@@ -311,6 +311,13 @@ export async function openAboutLink(link: AboutLink): Promise<void> {
   await invoke('open_about_link', { link });
 }
 
+/** 关于页 GitHub Star 数：shell 会话缓存 + 零轮询；失败返回 null，UI 静默降级 */
+export async function getRepositoryStars(): Promise<number | null> {
+  if (!isTauri()) return 128;
+  const result = await invoke<{ stars: number | null }>('get_repository_stars');
+  return result.stars ?? null;
+}
+
 export function subscribeAppUpdate(listener: (state: AppUpdateState) => void): () => void {
   listeners.add(listener);
   if (isTauri()) {

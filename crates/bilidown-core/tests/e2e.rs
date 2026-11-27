@@ -284,3 +284,28 @@ async fn e2e_subtitle_and_cover_download() {
     let meta = tokio::fs::metadata(cover_path).await.expect("封面文件");
     assert!(meta.len() > 1_000, "封面文件应非空");
 }
+
+#[tokio::test]
+#[ignore = "需要真实网络"]
+async fn e2e_cover_download_with_attachment_client() {
+    use bilidown_core::api::attachment::{AttachmentUrlPolicy, attachment_client};
+    use bilidown_core::media::cover;
+
+    let bili = test_client_authenticated().unwrap_or_else(test_client);
+    bili.activate_buvid().await;
+    let http = test_http();
+    let id = parse_one(&http, "https://www.bilibili.com/video/BV15b411L7M4")
+        .await
+        .expect("解析 TED 视频");
+    let content = resolve_content(&bili, &id).await.expect("TED 视频详情");
+    let cover_url = content.cover_url.as_deref().expect("视频应有封面");
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path().join("ted.mp4");
+    let http = attachment_client(test_proxy().as_deref(), AttachmentUrlPolicy::default())
+        .expect("附件 client");
+    let cover_path = cover::download_cover(&http, cover_url, &video, dir.path())
+        .await
+        .expect("受限客户端封面下载");
+    let meta = tokio::fs::metadata(cover_path).await.expect("封面文件");
+    assert!(meta.len() > 1_000, "封面文件应非空");
+}
